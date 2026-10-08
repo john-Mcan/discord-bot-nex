@@ -243,7 +243,7 @@ export async function downloadArtwork(
   timeoutMs = ARTWORK_DOWNLOAD_TIMEOUT_MS,
 ): Promise<Artwork> {
   const response = await fetch(url, {
-    headers: { Accept: "image/*", "User-Agent": "monkey-bot/0.2" },
+    headers: { Accept: "image/*", "User-Agent": "discord-bot-nex/0.2" },
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -861,7 +861,7 @@ export class RadioManager {
       if (session.stopping || generation !== session.streamGeneration || !this.metadataUrl) return;
       try {
         const response = await fetch(this.metadataUrl, {
-          headers: { Accept: "application/json", "User-Agent": "monkey-bot/0.2" },
+          headers: { Accept: "application/json", "User-Agent": "discord-bot-nex/0.2" },
           signal: AbortSignal.timeout(10_000),
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1241,7 +1241,7 @@ export class RadioManager {
         parsedUrl,
         {
           headers: {
-            "User-Agent": "monkey-bot/0.2",
+            "User-Agent": "discord-bot-nex/0.2",
             "Icy-MetaData": "1",
             Accept: "audio/*,*/*;q=0.8",
           },

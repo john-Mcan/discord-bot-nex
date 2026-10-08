@@ -63,28 +63,28 @@ export class HealthServer {
   private prometheusMetrics(): string {
     const metrics = this.radio.getMetrics();
     const lines = [
-      "# HELP monkey_bot_up Whether the Discord client is ready.",
-      "# TYPE monkey_bot_up gauge",
-      `monkey_bot_up ${this.client.isReady() ? 1 : 0}`,
-      "# HELP monkey_bot_gateway_ping_ms Discord gateway ping in milliseconds.",
-      "# TYPE monkey_bot_gateway_ping_ms gauge",
-      `monkey_bot_gateway_ping_ms ${Math.max(0, this.client.ws.ping)}`,
-      "# TYPE monkey_bot_sessions gauge",
-      `monkey_bot_sessions ${metrics.sessions}`,
-      "# TYPE monkey_bot_playing_sessions gauge",
-      `monkey_bot_playing_sessions ${metrics.playingSessions}`,
-      "# TYPE monkey_bot_reconnecting_sessions gauge",
-      `monkey_bot_reconnecting_sessions ${metrics.reconnectingSessions}`,
-      "# TYPE monkey_bot_stream_failures_total counter",
-      `monkey_bot_stream_failures_total ${metrics.streamFailures}`,
-      "# TYPE monkey_bot_stream_retries_total counter",
-      `monkey_bot_stream_retries_total ${metrics.totalRetries}`,
-      "# TYPE monkey_bot_metadata_updates_total counter",
-      `monkey_bot_metadata_updates_total ${metrics.metadataUpdates}`,
+      "# HELP discord_bot_nex_up Whether the Discord client is ready.",
+      "# TYPE discord_bot_nex_up gauge",
+      `discord_bot_nex_up ${this.client.isReady() ? 1 : 0}`,
+      "# HELP discord_bot_nex_gateway_ping_ms Discord gateway ping in milliseconds.",
+      "# TYPE discord_bot_nex_gateway_ping_ms gauge",
+      `discord_bot_nex_gateway_ping_ms ${Math.max(0, this.client.ws.ping)}`,
+      "# TYPE discord_bot_nex_sessions gauge",
+      `discord_bot_nex_sessions ${metrics.sessions}`,
+      "# TYPE discord_bot_nex_playing_sessions gauge",
+      `discord_bot_nex_playing_sessions ${metrics.playingSessions}`,
+      "# TYPE discord_bot_nex_reconnecting_sessions gauge",
+      `discord_bot_nex_reconnecting_sessions ${metrics.reconnectingSessions}`,
+      "# TYPE discord_bot_nex_stream_failures_total counter",
+      `discord_bot_nex_stream_failures_total ${metrics.streamFailures}`,
+      "# TYPE discord_bot_nex_stream_retries_total counter",
+      `discord_bot_nex_stream_retries_total ${metrics.totalRetries}`,
+      "# TYPE discord_bot_nex_metadata_updates_total counter",
+      `discord_bot_nex_metadata_updates_total ${metrics.metadataUpdates}`,
     ];
     for (const [command, count] of Object.entries(metrics.commands)) {
       const safeCommand = command.replace(/[^a-zA-Z0-9_]/g, "_");
-      lines.push(`monkey_bot_commands_total{command="${safeCommand}"} ${count}`);
+      lines.push(`discord_bot_nex_commands_total{command="${safeCommand}"} ${count}`);
     }
     return `${lines.join("\n")}\n`;
   }

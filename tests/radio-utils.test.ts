@@ -152,8 +152,8 @@ test("HealthServer expone health JSON y metricas Prometheus", async () => {
 
     const metricsResponse = await fetch(`http://127.0.0.1:${port}/metrics`);
     const metrics = await metricsResponse.text();
-    assert.match(metrics, /monkey_bot_playing_sessions 1/);
-    assert.match(metrics, /monkey_bot_commands_total\{command="play"\} 5/);
+    assert.match(metrics, /discord_bot_nex_playing_sessions 1/);
+    assert.match(metrics, /discord_bot_nex_commands_total\{command="play"\} 5/);
   } finally {
     await health.stop();
   }
