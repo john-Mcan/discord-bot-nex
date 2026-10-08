@@ -46,6 +46,7 @@ Si `DEV_GUILD_ID` está configurado, `deploy:commands` registra los comandos sol
 | `RADIO_STREAM_URL` | Stream HTTP/HTTPS | Obligatoria |
 | `DEV_GUILD_ID` | Registro rápido de comandos en desarrollo | Global |
 | `RADIO_NAME` | Nombre mostrado en embeds | `Radio` |
+| `RADIO_WEBSITE_URL` | Web de la radio: enlaza la canción y agrega el botón "Escuchar en…" | Sin enlace |
 | `IDLE_DISCONNECT_MINUTES` | Tiempo con cero oyentes | `5` |
 | `COMMAND_COOLDOWN_SECONDS` | Cooldown por usuario y comando | `3` |
 | `RADIO_METADATA_URL` | Endpoint JSON de metadata (NEX: `https://api.nex-radio.com/api/radio/snapshot`) | API de AzuraCast inferida del stream |

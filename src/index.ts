@@ -14,6 +14,7 @@ const client = new Client({
 const radio = new RadioManager(client, {
   streamUrl: env.RADIO_STREAM_URL,
   stationName: env.RADIO_NAME,
+  websiteUrl: env.RADIO_WEBSITE_URL,
   idleDisconnectMinutes: env.IDLE_DISCONNECT_MINUTES,
   metadataUrl: env.RADIO_METADATA_URL,
   metadataTitlePath: env.RADIO_METADATA_TITLE_PATH,

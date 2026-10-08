@@ -13,12 +13,16 @@ import {
   type VoiceConnection,
 } from "@discordjs/voice";
 import {
+  ActionRowBuilder,
   ActivityType,
   AttachmentBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ChannelType,
   EmbedBuilder,
   GuildMember,
   PermissionFlagsBits,
+  escapeMarkdown,
   type ChatInputCommandInteraction,
   type Client,
   type Message,
@@ -46,7 +50,13 @@ const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
 const ARTWORK_DOWNLOAD_TIMEOUT_MS = 8_000;
 const ARTWORK_DOWNLOAD_ATTEMPTS = 2;
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
-const FALLBACK_ARTWORK_PATH = path.resolve(__dirname, "../../img/icon-512.png");
+// Logo de la radio: icono de la cabecera del mensaje y portada de respaldo.
+const STATION_LOGO_PATH = path.resolve(__dirname, "../../img/icon-512.png");
+const STATION_LOGO_FILE = "logo.png";
+// Colores de la marca NEX (los mismos de la web).
+const COLOR_LIVE = 0xff0ea2;
+const COLOR_WARNING = 0xfffc00;
+const COLOR_OFFLINE = 0x818192;
 const ARTWORK_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/png": "png",
@@ -114,6 +124,7 @@ type SendableChannel = {
     content?: string;
     embeds?: EmbedBuilder[];
     files?: AttachmentBuilder[];
+    components?: ActionRowBuilder<ButtonBuilder>[];
     allowedMentions?: { parse: never[] };
   }) => Promise<Message>;
 };
@@ -121,11 +132,13 @@ type SendableChannel = {
 type EmbedPayload = {
   embeds: EmbedBuilder[];
   files: AttachmentBuilder[];
+  components: ActionRowBuilder<ButtonBuilder>[];
 };
 
 export type RadioManagerConfig = {
   streamUrl: string;
   stationName: string | null;
+  websiteUrl: string | null;
   idleDisconnectMinutes: number;
   metadataUrl: string | null;
   metadataTitlePath: string | null;
@@ -151,6 +164,10 @@ function sessionContext(session: GuildSession): Record<string, unknown> {
     voiceChannelId: session.voiceChannelId,
     status: session.status,
   };
+}
+
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
 function errorMessage(error: unknown): string {
@@ -179,11 +196,67 @@ function firstString(value: unknown, paths: string[]): { value: string; path: st
   return null;
 }
 
+export type SongInfo = {
+  title: string;
+  artist: string | null;
+};
+
+export type MetadataExtras = {
+  endsAt: number | null;
+  voted: boolean;
+  votingOpen: boolean;
+};
+
+const EMPTY_EXTRAS: MetadataExtras = { endsAt: null, voted: false, votingOpen: false };
+
+export function songLabel(song: SongInfo): string {
+  return song.artist ? `${song.artist} — ${song.title}` : song.title;
+}
+
+// ICY solo trae "Artista - Titulo" en un texto; se separa para mostrarlo.
+export function splitIcyTitle(text: string): SongInfo {
+  const separator = text.indexOf(" - ");
+  if (separator <= 0) return { title: text, artist: null };
+  const artist = text.slice(0, separator).trim();
+  const title = text.slice(separator + 3).trim();
+  return artist && title ? { title, artist } : { title: text, artist: null };
+}
+
 export function extractMetadataTitle(
   payload: unknown,
   titlePath: string | null,
   artistPath: string | null,
 ): string | null {
+  const song = extractMetadataSong(payload, titlePath, artistPath);
+  return song ? songLabel(song) : null;
+}
+
+// Datos opcionales para el mensaje: cuando termina la cancion y, en el
+// snapshot NEX, si hay votacion abierta o si la cancion fue votada.
+export function extractMetadataExtras(payload: unknown): MetadataExtras {
+  let endsAt: number | null = null;
+  const endsAtMs = readPath(payload, "now_playing.ends_at_ms");
+  const playedAt = readPath(payload, "now_playing.played_at");
+  const duration = readPath(payload, "now_playing.duration");
+  if (typeof endsAtMs === "number" && Number.isFinite(endsAtMs)) {
+    endsAt = endsAtMs;
+  } else if (typeof playedAt === "number" && typeof duration === "number" && duration > 0) {
+    endsAt = (playedAt + duration) * 1000;
+  }
+  return {
+    endsAt,
+    voted:
+      readPath(payload, "now_playing.is_voted") === true ||
+      readPath(payload, "now_playing.play_source") === "voted",
+    votingOpen: readPath(payload, "phase") === "VOTING",
+  };
+}
+
+export function extractMetadataSong(
+  payload: unknown,
+  titlePath: string | null,
+  artistPath: string | null,
+): SongInfo | null {
   const titlePaths = [
     ...(titlePath ? [titlePath] : []),
     "now_playing.song.title",
@@ -207,9 +280,9 @@ export function extractMetadataTitle(
   if (!title) return null;
   const artist = firstString(payload, artistPaths);
   if (!artist || title.value.toLocaleLowerCase().includes(artist.value.toLocaleLowerCase())) {
-    return title.value;
+    return { title: title.value, artist: null };
   }
-  return `${artist.value} — ${title.value}`;
+  return { title: title.value, artist: artist.value };
 }
 
 export function extractMetadataArtwork(
@@ -379,7 +452,7 @@ export class RadioManager {
   private publishedPresenceTitle: string | null = null;
   private lastPresenceAt = 0;
   private presenceTimer?: NodeJS.Timeout;
-  private fallbackArtworkPromise?: Promise<Artwork | null>;
+  private stationLogoPromise?: Promise<Artwork | null>;
   private readonly metadataUrl: string | null;
 
   // Transmision compartida: un solo stream HTTP y un solo reproductor (y por
@@ -400,6 +473,8 @@ export class RadioManager {
   // Metadata compartida: una sola consulta y una sola descarga de portada
   // por cancion, sin importar cuantos servidores esten escuchando.
   private currentTitle: string | null = null;
+  private currentSong: SongInfo | null = null;
+  private currentExtras: MetadataExtras = EMPTY_EXTRAS;
   private currentArtworkUrl: string | null = null;
   private metadataSource: MetadataSource = null;
   private metadataUpdatedAt = 0;
@@ -574,7 +649,7 @@ export class RadioManager {
     const status = this.effectiveStatus(session);
     const lastError = session.lastError ?? this.lastStreamError;
     const embed = new EmbedBuilder()
-      .setColor(status === "playing" ? 0x2ecc71 : 0xf39c12)
+      .setColor(status === "playing" ? COLOR_LIVE : COLOR_WARNING)
       .setTitle(`Estado — ${this.stationName}`)
       .addFields(
         { name: "Estado", value: this.statusLabel(status), inline: true },
@@ -944,7 +1019,7 @@ export class RadioManager {
         if (generation !== this.streamGeneration) return;
         try {
           const title = parseIcyMetadata(metadata);
-          if (title) this.handleMetadata(title, "icy");
+          if (title) this.handleMetadata({ source: "icy", label: title, song: splitIcyTitle(title) });
         } catch (error) {
           logger.warn("metadata.icy_parse_failed", { error: errorMessage(error) });
         }
@@ -1028,6 +1103,8 @@ export class RadioManager {
     }
     this.lastAudioAt = null;
     this.currentTitle = null;
+    this.currentSong = null;
+    this.currentExtras = EMPTY_EXTRAS;
     this.currentArtworkUrl = null;
     this.metadataSource = null;
     this.metadataUpdatedAt = 0;
@@ -1054,13 +1131,20 @@ export class RadioManager {
         if (body.length > 1_000_000) throw new Error("La respuesta de metadata supera 1 MB");
         const payload: unknown = JSON.parse(body);
         if (epoch !== this.broadcastEpoch) return;
-        const title = extractMetadataTitle(
+        const song = extractMetadataSong(
           payload,
           this.config.metadataTitlePath,
           this.config.metadataArtistPath,
         );
-        const artworkUrl = extractMetadataArtwork(payload, this.config.metadataArtworkPath);
-        if (title) this.handleMetadata(title, "json", artworkUrl);
+        if (song) {
+          this.handleMetadata({
+            source: "json",
+            label: songLabel(song),
+            song,
+            artworkUrl: extractMetadataArtwork(payload, this.config.metadataArtworkPath),
+            extras: extractMetadataExtras(payload),
+          });
+        }
         delayMs = nextMetadataPollDelay(payload, delayMs);
       } catch (error) {
         logger.warn("metadata.poll_failed", { error: errorMessage(error) });
@@ -1077,12 +1161,15 @@ export class RadioManager {
     this.metadataPolling = false;
   }
 
-  private handleMetadata(
-    rawTitle: string,
-    source: Exclude<MetadataSource, null>,
-    artworkUrl?: string | null,
-  ): void {
-    const title = rawTitle.replace(/\0/g, "").trim().slice(0, 300);
+  private handleMetadata(update: {
+    source: Exclude<MetadataSource, null>;
+    label: string;
+    song: SongInfo;
+    artworkUrl?: string | null;
+    extras?: MetadataExtras;
+  }): void {
+    const { source, artworkUrl } = update;
+    const title = update.label.replace(/\0/g, "").trim().slice(0, 300);
     if (!title) return;
     if (
       source === "icy" &&
@@ -1091,11 +1178,20 @@ export class RadioManager {
     ) return;
     const titleChanged = title !== this.currentTitle;
     const artworkChanged = artworkUrl !== undefined && artworkUrl !== this.currentArtworkUrl;
-    if (!titleChanged && !artworkChanged && source === this.metadataSource) {
+    // ICY no trae tiempos ni votacion: si cambia la cancion por ICY, los datos
+    // del snapshot anterior ya no aplican.
+    const extras = update.extras ?? (titleChanged ? EMPTY_EXTRAS : this.currentExtras);
+    const extrasChanged =
+      extras.endsAt !== this.currentExtras.endsAt ||
+      extras.voted !== this.currentExtras.voted ||
+      extras.votingOpen !== this.currentExtras.votingOpen;
+    if (!titleChanged && !artworkChanged && !extrasChanged && source === this.metadataSource) {
       if (source === "json") this.metadataUpdatedAt = Date.now();
       return;
     }
     this.currentTitle = title;
+    this.currentSong = update.song;
+    this.currentExtras = extras;
     if (artworkUrl !== undefined) this.currentArtworkUrl = artworkUrl;
     this.metadataSource = source;
     this.metadataUpdatedAt = Date.now();
@@ -1313,74 +1409,130 @@ export class RadioManager {
   }
 
   private async buildNowPlayingPayload(session: GuildSession): Promise<EmbedPayload> {
-    const title = this.currentTitle;
-    const [listeners, artwork] = await Promise.all([
+    const song = this.currentSong;
+    const extras = this.currentExtras;
+    const [listeners, cover, logo] = await Promise.all([
       this.humanListenerCount(session),
-      this.resolveArtwork(this.currentArtworkUrl, true),
+      this.resolveCover(this.currentArtworkUrl, true),
+      this.stationLogo(),
     ]);
     const status = this.effectiveStatus(session);
+    const live = status === "playing";
     const embed = new EmbedBuilder()
-      .setColor(status === "playing" ? 0x2ecc71 : 0xf39c12)
-      .setTitle(this.stationName)
-      .setDescription(
-        title
-          ? `Sonando ahora\n▶️ **${title}**`
-          : "_Esperando información de la canción..._",
-      )
-      .addFields(
-        {
-          name: "Estado",
-          value: status === "playing" ? "Activo" : this.statusLabel(status),
-          inline: true,
-        },
-        { name: "Canal", value: `<#${session.voiceChannelId}>`, inline: true },
-        { name: "Oyentes", value: String(listeners), inline: true },
-      )
-      .setFooter({
-        text: this.metadataSource
-          ? `Actualizado desde ${this.metadataSource.toUpperCase()}`
-          : "Esperando metadata",
-      })
-      .setTimestamp();
-    return { embeds: [embed], files: this.attachArtwork(embed, artwork) };
+      .setColor(live ? COLOR_LIVE : COLOR_WARNING)
+      .setAuthor(this.authorLine(live ? "EN VIVO" : this.statusLabel(status).toUpperCase(), logo));
+
+    const lines: string[] = [];
+    if (!song) lines.push("_Esperando información de la canción..._");
+    else {
+      embed.setTitle(truncate(escapeMarkdown(song.title), 256));
+      if (this.config.websiteUrl) embed.setURL(this.config.websiteUrl);
+      if (song.artist) lines.push(truncate(escapeMarkdown(song.artist), 512));
+    }
+    if (lines.length > 0) lines.push("");
+    if (!live) lines.push(`⚠️ ${this.statusLabel(status)} con la radio...`);
+    const details: string[] = [];
+    if (live && extras.endsAt && extras.endsAt > Date.now()) {
+      // Discord actualiza la cuenta regresiva solo, sin editar el mensaje.
+      details.push(`⏱️ Termina <t:${Math.floor(extras.endsAt / 1000)}:R>`);
+    }
+    details.push(`🎧 ${listeners} en <#${session.voiceChannelId}>`);
+    lines.push(details.join("  ·  "));
+    if (extras.voted) lines.push("🗳️ Elegida por votación de la comunidad");
+    if (extras.votingOpen && this.config.websiteUrl) {
+      lines.push(`🗳️ Votación abierta: elige la próxima en [${this.websiteLabel()}](${this.config.websiteUrl})`);
+    }
+    embed.setDescription(lines.join("\n"));
+    return {
+      embeds: [embed],
+      files: this.attachImages(embed, cover, logo),
+      components: this.linkButtons(),
+    };
   }
 
   private async updatePersistentAsStopped(session: GuildSession, reason: string): Promise<void> {
     if (!session.nowPlayingMessage) return;
-    const embed = new EmbedBuilder()
-      .setColor(0x95a5a6)
-      .setTitle(this.stationName)
-      .setDescription(this.currentTitle ? `Ultima cancion: **${this.currentTitle}**` : "Radio detenida")
-      .addFields({ name: "Estado", value: "Desconectada", inline: true })
-      .setFooter({ text: `Motivo: ${this.stopReasonLabel(reason)}` })
-      .setTimestamp();
     // Sin descarga: no retrasamos la desconexion esperando a la red.
-    const artwork = await this.resolveArtwork(this.currentArtworkUrl, false);
-    const files = this.attachArtwork(embed, artwork);
-    await session.nowPlayingMessage.edit({ embeds: [embed], files, attachments: [] }).catch(() => null);
+    const [cover, logo] = await Promise.all([
+      this.resolveCover(this.currentArtworkUrl, false),
+      this.stationLogo(),
+    ]);
+    const song = this.currentSong;
+    const lines = [`Motivo: ${this.stopReasonLabel(reason)}.`];
+    if (song) {
+      const artist = song.artist ? ` · ${escapeMarkdown(song.artist)}` : "";
+      lines.push(truncate(`Última canción: **${escapeMarkdown(song.title)}**${artist}`, 1024));
+    }
+    lines.push("", "Usa `/play` para volver a escucharla.");
+    const embed = new EmbedBuilder()
+      .setColor(COLOR_OFFLINE)
+      .setAuthor(this.authorLine("DESCONECTADA", logo))
+      .setTitle("Radio desconectada")
+      .setDescription(lines.join("\n"));
+    const files = this.attachImages(embed, cover, logo);
+    await session.nowPlayingMessage
+      .edit({ embeds: [embed], files, attachments: [], components: this.linkButtons() })
+      .catch(() => null);
   }
 
-  // La portada se sube como adjunto en vez de enlazar la URL: asi Discord no
-  // depende de su proxy de imagenes externas, que a veces falla al descargarla
-  // y deja el embed sin portada.
-  private async resolveArtwork(url: string | null, allowDownload: boolean): Promise<Artwork | null> {
-    if (url && this.artwork?.url === url) return this.artwork;
-    if (url && allowDownload) {
-      // Todas las sesiones que publican a la vez comparten la misma descarga.
-      let download = this.artworkDownload;
-      if (!download || download.url !== url) {
-        const promise = this.downloadArtworkWithRetry(url);
-        const current = { url, promise };
-        download = current;
-        this.artworkDownload = current;
-        void promise.then(() => {
-          if (this.artworkDownload === current) this.artworkDownload = undefined;
-        });
-      }
-      const artwork = await download.promise;
-      if (artwork) return artwork;
+  private authorLine(state: string, logo: Artwork | null): { name: string; iconURL?: string; url?: string } {
+    return {
+      name: truncate(`${this.stationName} · ${state}`, 256),
+      ...(logo ? { iconURL: `attachment://${logo.fileName}` } : {}),
+      ...(this.config.websiteUrl ? { url: this.config.websiteUrl } : {}),
+    };
+  }
+
+  private linkButtons(): ActionRowBuilder<ButtonBuilder>[] {
+    if (!this.config.websiteUrl) return [];
+    const button = new ButtonBuilder()
+      .setStyle(ButtonStyle.Link)
+      .setLabel(`Escuchar en ${this.websiteLabel()}`)
+      .setURL(this.config.websiteUrl)
+      .setEmoji("🌐");
+    return [new ActionRowBuilder<ButtonBuilder>().addComponents(button)];
+  }
+
+  private websiteLabel(): string {
+    try {
+      return new URL(this.config.websiteUrl ?? "").hostname.replace(/^www\./, "");
+    } catch {
+      return "la web";
     }
-    return this.fallbackArtwork();
+  }
+
+  // Las imagenes se suben como adjuntos en vez de enlazar URLs: asi Discord no
+  // depende de su proxy de imagenes externas, que a veces falla al descargarlas
+  // y deja el embed sin portada.
+  private attachImages(
+    embed: EmbedBuilder,
+    cover: Artwork | null,
+    logo: Artwork | null,
+  ): AttachmentBuilder[] {
+    const files = [cover, logo]
+      .filter((image): image is Artwork => image !== null)
+      .map((image) => new AttachmentBuilder(image.data, { name: image.fileName }));
+    const thumbnail = cover ?? logo;
+    if (thumbnail) embed.setThumbnail(`attachment://${thumbnail.fileName}`);
+    return files;
+  }
+
+  private async resolveCover(url: string | null, allowDownload: boolean): Promise<Artwork | null> {
+    if (!url) return null;
+    if (this.artwork?.url === url) return this.artwork;
+    if (!allowDownload) return null;
+    // Todas las sesiones que publican a la vez comparten la misma descarga.
+    let download = this.artworkDownload;
+    if (!download || download.url !== url) {
+      const promise = this.downloadArtworkWithRetry(url);
+      const current = { url, promise };
+      download = current;
+      this.artworkDownload = current;
+      void promise.then(() => {
+        if (this.artworkDownload === current) this.artworkDownload = undefined;
+      });
+    }
+    return download.promise;
   }
 
   private async downloadArtworkWithRetry(url: string): Promise<Artwork | null> {
@@ -1396,23 +1548,17 @@ export class RadioManager {
     return null;
   }
 
-  private fallbackArtwork(): Promise<Artwork | null> {
-    this.fallbackArtworkPromise ??= readFile(FALLBACK_ARTWORK_PATH)
-      .then((data): Artwork => ({ url: null, data, fileName: "cover.png" }))
+  private stationLogo(): Promise<Artwork | null> {
+    this.stationLogoPromise ??= readFile(STATION_LOGO_PATH)
+      .then((data): Artwork => ({ url: null, data, fileName: STATION_LOGO_FILE }))
       .catch((error: unknown) => {
-        logger.warn("artwork.fallback_unavailable", {
-          path: FALLBACK_ARTWORK_PATH,
+        logger.warn("artwork.logo_unavailable", {
+          path: STATION_LOGO_PATH,
           error: errorMessage(error),
         });
         return null;
       });
-    return this.fallbackArtworkPromise;
-  }
-
-  private attachArtwork(embed: EmbedBuilder, artwork: Artwork | null): AttachmentBuilder[] {
-    if (!artwork) return [];
-    embed.setThumbnail(`attachment://${artwork.fileName}`);
-    return [new AttachmentBuilder(artwork.data, { name: artwork.fileName })];
+    return this.stationLogoPromise;
   }
 
   private effectiveStatus(session: GuildSession): SessionStatus {

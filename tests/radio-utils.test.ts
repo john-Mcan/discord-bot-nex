@@ -9,9 +9,12 @@ import {
   IcyDemuxer,
   downloadArtwork,
   extractMetadataArtwork,
+  extractMetadataExtras,
+  extractMetadataSong,
   extractMetadataTitle,
   inferAzuraCastMetadataUrl,
   nextMetadataPollDelay,
+  splitIcyTitle,
   parseIcyMetadata,
   readPath,
 } from "../src/radio/RadioManager";
@@ -126,6 +129,30 @@ test("downloadArtwork descarga la portada y rechaza respuestas que no son imagen
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test("separa titulo y artista para mostrarlos por separado", () => {
+  assert.deepEqual(
+    extractMetadataSong({ now_playing: { song: { title: "BbY WOW", artist: "KAROL G, Judeline" } } }, null, null),
+    { title: "BbY WOW", artist: "KAROL G, Judeline" },
+  );
+  assert.deepEqual(splitIcyTitle("Guns N' Roses - Patience"), { title: "Patience", artist: "Guns N' Roses" });
+  assert.deepEqual(splitIcyTitle("Jingle NEX"), { title: "Jingle NEX", artist: null });
+});
+
+test("extractMetadataExtras lee fin de cancion y votacion del snapshot NEX y AzuraCast", () => {
+  assert.deepEqual(
+    extractMetadataExtras({
+      phase: "VOTING",
+      now_playing: { ends_at_ms: 1_790_000_000_000, is_voted: false, play_source: "voted" },
+    }),
+    { endsAt: 1_790_000_000_000, voted: true, votingOpen: true },
+  );
+  assert.deepEqual(
+    extractMetadataExtras({ now_playing: { played_at: 1_790_000_000, duration: 180 } }),
+    { endsAt: 1_790_000_180_000, voted: false, votingOpen: false },
+  );
+  assert.deepEqual(extractMetadataExtras({}), { endsAt: null, voted: false, votingOpen: false });
 });
 
 test("nextMetadataPollDelay consulta justo despues del fin de la cancion", () => {
