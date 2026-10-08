@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import test from "node:test";
 import type { Client } from "discord.js";
 import { HealthServer } from "../src/health";
 import {
   IcyDemuxer,
+  downloadArtwork,
   extractMetadataArtwork,
   extractMetadataTitle,
   inferAzuraCastMetadataUrl,
@@ -78,6 +80,36 @@ test("extrae portada de AzuraCast y rechaza URLs no web", () => {
     "https://radio.example/art/song.jpg",
   );
   assert.equal(extractMetadataArtwork({ art: "javascript:alert(1)" }, null), null);
+});
+
+test("downloadArtwork descarga la portada y rechaza respuestas que no son imagen", async () => {
+  const image = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
+  const server = createHttpServer((req, res) => {
+    if (req.url === "/art.jpg") {
+      res.writeHead(200, { "Content-Type": "image/jpeg" });
+      res.end(image);
+    } else if (req.url === "/page") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<html></html>");
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  const base = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+  try {
+    const artwork = await downloadArtwork(`${base}/art.jpg`);
+    assert.equal(artwork.fileName, "cover.jpg");
+    assert.equal(artwork.url, `${base}/art.jpg`);
+    assert.deepEqual(artwork.data, image);
+    await assert.rejects(downloadArtwork(`${base}/page`), /no soportado/);
+    await assert.rejects(downloadArtwork(`${base}/missing.jpg`), /HTTP 404/);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test("infiere el endpoint de metadata para streams AzuraCast", () => {

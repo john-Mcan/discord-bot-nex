@@ -13,6 +13,7 @@ import {
 } from "@discordjs/voice";
 import {
   ActivityType,
+  AttachmentBuilder,
   ChannelType,
   EmbedBuilder,
   GuildMember,
@@ -23,9 +24,11 @@ import {
   type VoiceState,
 } from "discord.js";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import * as http from "node:http";
 import * as https from "node:https";
+import * as path from "node:path";
 import { PassThrough, Transform, type TransformCallback } from "node:stream";
 import type { Readable } from "node:stream";
 import { logger } from "../logger";
@@ -39,6 +42,16 @@ const MAX_REDIRECTS = 5;
 const MAX_START_ATTEMPTS = 5;
 const AUDIO_HIGH_WATER_MARK = 128 * 1024;
 const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
+const ARTWORK_DOWNLOAD_TIMEOUT_MS = 8_000;
+const ARTWORK_DOWNLOAD_ATTEMPTS = 2;
+const MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
+const FALLBACK_ARTWORK_PATH = path.resolve(__dirname, "../../img/icon-512.png");
+const ARTWORK_EXTENSIONS: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
 
 type SessionStatus =
   | "connecting"
@@ -56,6 +69,12 @@ type IcyHandle = {
   demuxer: IcyDemuxer | null;
 };
 
+export type Artwork = {
+  url: string | null;
+  data: Buffer;
+  fileName: string;
+};
+
 type GuildSession = {
   id: string;
   guildId: string;
@@ -71,6 +90,7 @@ type GuildSession = {
   streamGeneration: number;
   currentTitle: string | null;
   currentArtworkUrl: string | null;
+  artwork?: Artwork;
   stationName: string;
   metadataSource: MetadataSource;
   metadataUpdatedAt: number;
@@ -88,6 +108,7 @@ type GuildSession = {
   lastAudioAt: number | null;
   nowPlayingMessage?: Message;
   nowPlayingUpdateTimer?: NodeJS.Timeout;
+  nowPlayingRevision: number;
   stopping: boolean;
 };
 
@@ -95,8 +116,14 @@ type SendableChannel = {
   send: (options: {
     content?: string;
     embeds?: EmbedBuilder[];
+    files?: AttachmentBuilder[];
     allowedMentions?: { parse: never[] };
   }) => Promise<Message>;
+};
+
+type EmbedPayload = {
+  embeds: EmbedBuilder[];
+  files: AttachmentBuilder[];
 };
 
 export type RadioManagerConfig = {
@@ -211,6 +238,27 @@ export function extractMetadataArtwork(
   }
 }
 
+export async function downloadArtwork(
+  url: string,
+  timeoutMs = ARTWORK_DOWNLOAD_TIMEOUT_MS,
+): Promise<Artwork> {
+  const response = await fetch(url, {
+    headers: { Accept: "image/*", "User-Agent": "monkey-bot/0.2" },
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+  const extension = ARTWORK_EXTENSIONS[contentType];
+  if (!extension) throw new Error(`Tipo de contenido no soportado: ${contentType || "desconocido"}`);
+  if (Number(response.headers.get("content-length")) > MAX_ARTWORK_BYTES) {
+    throw new Error("La portada supera el tamano maximo");
+  }
+  const data = Buffer.from(await response.arrayBuffer());
+  if (data.length === 0) throw new Error("La portada esta vacia");
+  if (data.length > MAX_ARTWORK_BYTES) throw new Error("La portada supera el tamano maximo");
+  return { url, data, fileName: `cover.${extension}` };
+}
+
 export function inferAzuraCastMetadataUrl(streamUrl: string): string | null {
   try {
     const url = new URL(streamUrl);
@@ -302,6 +350,7 @@ export class RadioManager {
   private publishedPresenceTitle: string | null = null;
   private lastPresenceAt = 0;
   private presenceTimer?: NodeJS.Timeout;
+  private fallbackArtworkPromise?: Promise<Artwork | null>;
   private readonly metadataUrl: string | null;
 
   constructor(
@@ -453,7 +502,8 @@ export class RadioManager {
       await interaction.reply({ content: "No hay una radio activa en este servidor.", ephemeral: true });
       return;
     }
-    await interaction.reply({ embeds: [await this.buildNowPlayingEmbed(session)] });
+    if (!(await this.defer(interaction))) return;
+    await interaction.editReply(await this.buildNowPlayingPayload(session));
   }
 
   public async status(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -569,6 +619,7 @@ export class RadioManager {
       totalRetries: 0,
       lastError: null,
       lastAudioAt: null,
+      nowPlayingRevision: 0,
       stopping: false,
     };
     this.sessions.set(params.guildId, session);
@@ -1059,19 +1110,25 @@ export class RadioManager {
 
   private async publishPersistentNowPlaying(session: GuildSession, create: boolean): Promise<void> {
     const metadataUpdatedAt = session.metadataUpdatedAt;
-    const embed = await this.buildNowPlayingEmbed(session);
+    const revision = ++session.nowPlayingRevision;
+    const payload = await this.buildNowPlayingPayload(session);
+    // Descargar la portada puede tardar: si mientras tanto empezo otra
+    // actualizacion, esta ya esta obsoleta y no debe pisar a la nueva.
+    if (revision !== session.nowPlayingRevision || session.stopping) return;
     if (session.nowPlayingMessage) {
-      await session.nowPlayingMessage.edit({ embeds: [embed] }).catch((error: unknown) => {
-        logger.warn("now_playing.edit_failed", { ...sessionContext(session), error: errorMessage(error) });
-        session.nowPlayingMessage = undefined;
-      });
+      await session.nowPlayingMessage
+        .edit({ ...payload, attachments: [] })
+        .catch((error: unknown) => {
+          logger.warn("now_playing.edit_failed", { ...sessionContext(session), error: errorMessage(error) });
+          session.nowPlayingMessage = undefined;
+        });
       return;
     }
     if (!create) return;
     const channel = await this.getSendableChannel(session.textChannelId);
     if (!channel) return;
     session.nowPlayingMessage = await channel
-      .send({ embeds: [embed], allowedMentions: { parse: [] } })
+      .send({ ...payload, allowedMentions: { parse: [] } })
       .catch(() => undefined);
     if (
       session.nowPlayingMessage &&
@@ -1081,14 +1138,18 @@ export class RadioManager {
     }
   }
 
-  private async buildNowPlayingEmbed(session: GuildSession): Promise<EmbedBuilder> {
-    const listeners = await this.humanListenerCount(session);
+  private async buildNowPlayingPayload(session: GuildSession): Promise<EmbedPayload> {
+    const title = session.currentTitle;
+    const [listeners, artwork] = await Promise.all([
+      this.humanListenerCount(session),
+      this.resolveArtwork(session, session.currentArtworkUrl, true),
+    ]);
     const embed = new EmbedBuilder()
       .setColor(session.status === "playing" ? 0x2ecc71 : 0xf39c12)
       .setTitle(session.stationName)
       .setDescription(
-        session.currentTitle
-          ? `Sonando ahora\n▶️ **${session.currentTitle}**`
+        title
+          ? `Sonando ahora\n▶️ **${title}**`
           : "_Esperando información de la canción..._",
       )
       .addFields(
@@ -1106,8 +1167,7 @@ export class RadioManager {
           : "Esperando metadata",
       })
       .setTimestamp();
-    if (session.currentArtworkUrl) embed.setThumbnail(session.currentArtworkUrl);
-    return embed;
+    return { embeds: [embed], files: this.attachArtwork(embed, artwork) };
   }
 
   private async updatePersistentAsStopped(session: GuildSession, reason: string): Promise<void> {
@@ -1119,8 +1179,57 @@ export class RadioManager {
       .addFields({ name: "Estado", value: "Desconectada", inline: true })
       .setFooter({ text: `Motivo: ${this.stopReasonLabel(reason)}` })
       .setTimestamp();
-    if (session.currentArtworkUrl) embed.setThumbnail(session.currentArtworkUrl);
-    await session.nowPlayingMessage.edit({ embeds: [embed] }).catch(() => null);
+    // Sin descarga: no retrasamos la desconexion esperando a la red.
+    const artwork = await this.resolveArtwork(session, session.currentArtworkUrl, false);
+    const files = this.attachArtwork(embed, artwork);
+    await session.nowPlayingMessage.edit({ embeds: [embed], files, attachments: [] }).catch(() => null);
+  }
+
+  // La portada se sube como adjunto en vez de enlazar la URL: asi Discord no
+  // depende de su proxy de imagenes externas, que a veces falla al descargarla
+  // y deja el embed sin portada.
+  private async resolveArtwork(
+    session: GuildSession,
+    url: string | null,
+    allowDownload: boolean,
+  ): Promise<Artwork | null> {
+    if (url && session.artwork?.url === url) return session.artwork;
+    if (url && allowDownload) {
+      for (let attempt = 1; attempt <= ARTWORK_DOWNLOAD_ATTEMPTS; attempt += 1) {
+        try {
+          const artwork = await downloadArtwork(url);
+          if (session.currentArtworkUrl === url) session.artwork = artwork;
+          return artwork;
+        } catch (error) {
+          logger.warn("artwork.download_failed", {
+            ...sessionContext(session),
+            url,
+            attempt,
+            error: errorMessage(error),
+          });
+        }
+      }
+    }
+    return this.fallbackArtwork();
+  }
+
+  private fallbackArtwork(): Promise<Artwork | null> {
+    this.fallbackArtworkPromise ??= readFile(FALLBACK_ARTWORK_PATH)
+      .then((data): Artwork => ({ url: null, data, fileName: "cover.png" }))
+      .catch((error: unknown) => {
+        logger.warn("artwork.fallback_unavailable", {
+          path: FALLBACK_ARTWORK_PATH,
+          error: errorMessage(error),
+        });
+        return null;
+      });
+    return this.fallbackArtworkPromise;
+  }
+
+  private attachArtwork(embed: EmbedBuilder, artwork: Artwork | null): AttachmentBuilder[] {
+    if (!artwork) return [];
+    embed.setThumbnail(`attachment://${artwork.fileName}`);
+    return [new AttachmentBuilder(artwork.data, { name: artwork.fileName })];
   }
 
   private openIcyStream(url: string, redirectDepth = 0): Promise<IcyHandle> {
