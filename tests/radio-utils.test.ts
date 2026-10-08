@@ -160,8 +160,8 @@ test("nextMetadataPollDelay consulta justo despues del fin de la cancion", () =>
     server_now_ms: 1_000_000,
     now_playing: { ends_at_ms: 1_000_000 + remainingMs },
   });
-  // Faltan 5 s: consulta al terminar mas un margen de 0,3 s.
-  assert.equal(nextMetadataPollDelay(snapshot(5_000), 15_000), 5_300);
+  // Faltan 5 s: consulta al terminar mas un margen de 1,3 s.
+  assert.equal(nextMetadataPollDelay(snapshot(5_000), 15_000), 6_300);
   // Falta mucho: no espera mas que el intervalo normal.
   assert.equal(nextMetadataPollDelay(snapshot(120_000), 15_000), 15_000);
   // Ya termino pero la fuente no publica la siguiente: reintenta pronto...
@@ -169,7 +169,7 @@ test("nextMetadataPollDelay consulta justo despues del fin de la cancion", () =>
   // ...salvo que lleve demasiado atrasada.
   assert.equal(nextMetadataPollDelay(snapshot(-60_000), 15_000), 15_000);
   // AzuraCast informa los segundos restantes.
-  assert.equal(nextMetadataPollDelay({ now_playing: { remaining: 4 } }, 15_000), 4_300);
+  assert.equal(nextMetadataPollDelay({ now_playing: { remaining: 4 } }, 15_000), 5_300);
   // Sin datos de tiempo: intervalo normal.
   assert.equal(nextMetadataPollDelay({ title: "x" }, 15_000), 15_000);
 });

@@ -64,15 +64,17 @@ const ARTWORK_EXTENSIONS: Record<string, string> = {
   "image/gif": "gif",
 };
 const METADATA_MIN_DELAY_MS = 1_000;
-const METADATA_END_GRACE_MS = 300;
+// La siguiente cancion empieza 1 s despues del ends_at de la anterior y el
+// backend la publica justo en ese instante: se consulta 0,3 s despues.
+const METADATA_END_GRACE_MS = 1_300;
 const METADATA_OVERDUE_RETRY_MS = 1_000;
 const METADATA_MAX_OVERDUE_MS = 20_000;
 const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
 // La cuenta regresiva apunta a cuando el mensaje cambia de verdad (fin de la
-// cancion + lo que tarda el bot en consultar y editar), para que nunca llegue a
-// mostrar "hace X segundos" mientras se espera la cancion nueva.
-const COUNTDOWN_DISPLAY_LAG_MS = 2_500;
+// cancion + consulta + edicion, unos 2,3 s), para que nunca llegue a mostrar
+// "hace X segundos" mientras se espera la cancion nueva.
+const COUNTDOWN_DISPLAY_LAG_MS = 3_000;
 
 type SessionStatus =
   | "connecting"
