@@ -71,10 +71,9 @@ const METADATA_OVERDUE_RETRY_MS = 1_000;
 const METADATA_MAX_OVERDUE_MS = 20_000;
 const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
-// La cuenta regresiva apunta a cuando el mensaje cambia de verdad (fin de la
-// cancion + consulta + edicion, unos 2,3 s), para que nunca llegue a mostrar
-// "hace X segundos" mientras se espera la cancion nueva.
-const COUNTDOWN_DISPLAY_LAG_MS = 3_000;
+// La cuenta regresiva llega a cero cuando cambia el audio: la siguiente
+// cancion empieza 1 s despues del ends_at de la anterior.
+const COUNTDOWN_DISPLAY_LAG_MS = 1_000;
 
 type SessionStatus =
   | "connecting"
