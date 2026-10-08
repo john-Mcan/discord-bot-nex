@@ -64,10 +64,15 @@ const ARTWORK_EXTENSIONS: Record<string, string> = {
   "image/gif": "gif",
 };
 const METADATA_MIN_DELAY_MS = 1_000;
-const METADATA_END_GRACE_MS = 1_500;
-const METADATA_OVERDUE_RETRY_MS = 2_000;
+const METADATA_END_GRACE_MS = 300;
+const METADATA_OVERDUE_RETRY_MS = 1_000;
 const METADATA_MAX_OVERDUE_MS = 20_000;
 const BROADCAST_LINGER_MS = 15_000;
+const NOW_PLAYING_DEBOUNCE_MS = 300;
+// La cuenta regresiva apunta a cuando el mensaje cambia de verdad (fin de la
+// cancion + lo que tarda el bot en consultar y editar), para que nunca llegue a
+// mostrar "hace X segundos" mientras se espera la cancion nueva.
+const COUNTDOWN_DISPLAY_LAG_MS = 2_500;
 
 type SessionStatus =
   | "connecting"
@@ -1202,7 +1207,11 @@ export class RadioManager {
       hasArtwork: Boolean(this.currentArtworkUrl),
       sessions: this.sessions.size,
     });
-    if (this.sessions.size > 0) this.schedulePresence(title);
+    if (this.sessions.size > 0) {
+      this.schedulePresence(title);
+      // La portada empieza a bajar ya, en paralelo con la espera de la edicion.
+      if (artworkChanged) void this.resolveCover(this.currentArtworkUrl, true);
+    }
     for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
   }
 
@@ -1375,7 +1384,7 @@ export class RadioManager {
     session.nowPlayingUpdateTimer = setTimeout(() => {
       session.nowPlayingUpdateTimer = undefined;
       void this.publishPersistentNowPlaying(session, false);
-    }, 1_000);
+    }, NOW_PLAYING_DEBOUNCE_MS);
   }
 
   private async publishPersistentNowPlaying(session: GuildSession, create: boolean): Promise<void> {
@@ -1432,9 +1441,10 @@ export class RadioManager {
     if (lines.length > 0) lines.push("");
     if (!live) lines.push(`⚠️ ${this.statusLabel(status)} con la radio...`);
     const details: string[] = [];
-    if (live && extras.endsAt && extras.endsAt > Date.now()) {
+    const countdownAt = extras.endsAt ? extras.endsAt + COUNTDOWN_DISPLAY_LAG_MS : null;
+    if (live && countdownAt && countdownAt > Date.now()) {
       // Discord actualiza la cuenta regresiva solo, sin editar el mensaje.
-      details.push(`⏱️ Termina <t:${Math.floor(extras.endsAt / 1000)}:R>`);
+      details.push(`⏱️ Termina <t:${Math.ceil(countdownAt / 1000)}:R>`);
     }
     details.push(`🎧 ${listeners} en <#${session.voiceChannelId}>`);
     lines.push(details.join("  ·  "));
