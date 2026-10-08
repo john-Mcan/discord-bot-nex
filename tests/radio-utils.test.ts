@@ -82,6 +82,21 @@ test("extrae portada de AzuraCast y rechaza URLs no web", () => {
   assert.equal(extractMetadataArtwork({ art: "javascript:alert(1)" }, null), null);
 });
 
+test("extrae portada y titulo del snapshot del backend NEX", () => {
+  const snapshot = {
+    station_id: "main",
+    now_playing: {
+      song: {
+        title: "Track",
+        artist: "Artist",
+        cover_url: "https://media.example/covers/abc-123",
+      },
+    },
+  };
+  assert.equal(extractMetadataTitle(snapshot, null, null), "Artist — Track");
+  assert.equal(extractMetadataArtwork(snapshot, null), "https://media.example/covers/abc-123");
+});
+
 test("downloadArtwork descarga la portada y rechaza respuestas que no son imagen", async () => {
   const image = Buffer.from([0xff, 0xd8, 0xff, 0xe0]);
   const server = createHttpServer((req, res) => {

@@ -222,7 +222,9 @@ export function extractMetadataArtwork(
   const artwork = firstString(payload, [
     ...(artworkPath ? [artworkPath] : []),
     "now_playing.song.art",
+    "now_playing.song.cover_url",
     "song.art",
+    "song.cover_url",
     "current.art",
     "data.art",
     "art",
