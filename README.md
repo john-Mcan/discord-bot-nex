@@ -6,6 +6,9 @@ Bot de Discord para reproducir una radio online en canales de voz. Está constru
 
 - Reproducción de streams MP3/AAC por HTTP o HTTPS.
 - Metadata ICY y fallback mediante endpoint JSON.
+- Un solo stream y un solo FFmpeg compartidos por todos los servidores: escala sin multiplicar conexiones a la radio.
+- Metadata consultada una vez para todos los servidores, justo al terminar cada canción.
+- Portada adjunta al mensaje, con el ícono de la radio como respaldo.
 - Mensaje persistente y comando para la canción actual.
 - Reconexión serializada con backoff exponencial.
 - Desconexión automática cuando el canal queda vacío.
