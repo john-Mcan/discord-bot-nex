@@ -13,7 +13,6 @@ import {
 } from "@discordjs/voice";
 import {
   ActionRowBuilder,
-  ActivityType,
   AttachmentBuilder,
   ButtonBuilder,
   ChannelType,
@@ -48,13 +47,13 @@ import {
   type EmbedPayload,
   type Station,
 } from "./nowPlayingView";
+import { Presence } from "./presence";
 import { sessionContext, type GuildSession, type SessionStatus } from "./session";
 
 const PLAYER_START_TIMEOUT_MS = 20_000;
 const CONNECTION_READY_TIMEOUT_MS = 20_000;
 const STREAM_STALL_TIMEOUT_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 15_000;
-const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
 const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
 
@@ -97,12 +96,9 @@ export class RadioManager {
   private readonly commandCounts = new Map<string, number>();
   private streamFailures = 0;
   private totalRetries = 0;
-  private pendingPresenceTitle: string | null = null;
-  private publishedPresenceTitle: string | null = null;
-  private lastPresenceAt = 0;
-  private presenceTimer?: NodeJS.Timeout;
   private stationLogoPromise?: Promise<Artwork | null>;
   private readonly metadata: MetadataTracker;
+  private readonly presence: Presence;
 
   // Transmision compartida: un solo stream HTTP y un solo reproductor (y por
   // tanto un solo FFmpeg) alimentan las conexiones de voz de todos los servidores.
@@ -123,6 +119,7 @@ export class RadioManager {
     private readonly client: Client,
     private readonly config: RadioManagerConfig,
   ) {
+    this.presence = new Presence(client);
     this.metadata = new MetadataTracker({
       url: config.metadataUrl ?? inferAzuraCastMetadataUrl(config.streamUrl),
       titlePath: config.metadataTitlePath,
@@ -343,7 +340,7 @@ export class RadioManager {
   }
 
   public async shutdown(): Promise<void> {
-    if (this.presenceTimer) clearTimeout(this.presenceTimer);
+    this.presence.dispose();
     await Promise.all(
       [...this.sessions.values()].map((session) => this.stopSession(session, "shutdown")),
     );
@@ -768,52 +765,16 @@ export class RadioManager {
       sessions: this.sessions.size,
     });
     if (this.sessions.size > 0) {
-      this.schedulePresence(title);
+      this.presence.schedule(title);
       // La portada empieza a bajar ya, en paralelo con la espera de la edicion.
       if (artworkChanged) void this.metadata.cover(true);
     }
     for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
   }
 
-  private schedulePresence(title: string): void {
-    this.pendingPresenceTitle = title;
-    const remaining = PRESENCE_UPDATE_INTERVAL_MS - (Date.now() - this.lastPresenceAt);
-    if (remaining <= 0) {
-      this.flushPresence();
-      return;
-    }
-    if (!this.presenceTimer) {
-      this.presenceTimer = setTimeout(() => {
-        this.presenceTimer = undefined;
-        this.flushPresence();
-      }, remaining);
-    }
-  }
-
-  private flushPresence(): void {
-    const title = this.pendingPresenceTitle?.trim();
-    if (!title || title === this.publishedPresenceTitle) return;
-    this.pendingPresenceTitle = null;
-    this.publishedPresenceTitle = title;
-    this.lastPresenceAt = Date.now();
-    this.client.user?.setPresence({
-      activities: [{ name: title.slice(0, 128), type: ActivityType.Listening }],
-      status: "online",
-    });
-  }
-
   private syncPresence(): void {
     const active = [...this.sessions.values()].some((session) => !session.stopping);
-    if (active && this.metadata.title) {
-      this.schedulePresence(this.metadata.title);
-      return;
-    }
-    this.pendingPresenceTitle = null;
-    this.publishedPresenceTitle = null;
-    this.client.user?.setPresence({
-      activities: [{ name: "dale /play a NEX!", type: ActivityType.Playing }],
-      status: "online",
-    });
+    this.presence.sync(active ? this.metadata.title : null);
   }
 
   private requestIdleRefresh(session: GuildSession): void {
