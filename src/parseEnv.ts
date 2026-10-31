@@ -23,9 +23,7 @@ function integerEnv(
   if (!raw) return fallback;
   const value = Number(raw);
   if (!Number.isInteger(value) || value < options.min || value > options.max) {
-    throw new Error(
-      `${name} debe ser un entero entre ${options.min} y ${options.max}`,
-    );
+    throw new Error(`${name} debe ser un entero entre ${options.min} y ${options.max}`);
   }
   return value;
 }

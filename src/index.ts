@@ -51,10 +51,12 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
   const availableAt = cooldowns.get(cooldownKey) ?? 0;
   if (now < availableAt) {
     const remaining = Math.max(1, Math.ceil((availableAt - now) / 1000));
-    await interaction.reply({
-      content: `Espera ${remaining}s antes de volver a usar este comando.`,
-      ephemeral: true,
-    }).catch(() => null);
+    await interaction
+      .reply({
+        content: `Espera ${remaining}s antes de volver a usar este comando.`,
+        ephemeral: true,
+      })
+      .catch(() => null);
     return;
   }
   if (env.COMMAND_COOLDOWN_SECONDS > 0) {
@@ -83,7 +85,9 @@ async function handleInteraction(interaction: Interaction): Promise<void> {
       error: error instanceof Error ? error.message : String(error),
     });
     if (!interaction.replied && !interaction.deferred) {
-      await interaction.reply({ content: "Ocurrio un error al procesar el comando.", ephemeral: true }).catch(() => null);
+      await interaction
+        .reply({ content: "Ocurrio un error al procesar el comando.", ephemeral: true })
+        .catch(() => null);
     } else if (interaction.deferred) {
       await interaction.editReply("Ocurrio un error al procesar el comando.").catch(() => null);
     }
@@ -114,7 +118,7 @@ process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
 process.on("unhandledRejection", (error) => {
   logger.error("process.unhandled_rejection", {
-    error: error instanceof Error ? error.stack ?? error.message : String(error),
+    error: error instanceof Error ? (error.stack ?? error.message) : String(error),
   });
 });
 process.on("uncaughtException", (error) => {
@@ -129,7 +133,7 @@ async function main(): Promise<void> {
 
 main().catch(async (error) => {
   logger.error("process.fatal", {
-    error: error instanceof Error ? error.stack ?? error.message : String(error),
+    error: error instanceof Error ? (error.stack ?? error.message) : String(error),
   });
   await shutdown("fatal", 1);
 });

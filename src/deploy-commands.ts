@@ -24,5 +24,3 @@ main().catch((err) => {
   console.error("[deploy:commands] Error:", err);
   process.exitCode = 1;
 });
-
-

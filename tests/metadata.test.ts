@@ -125,10 +125,10 @@ test("autodetecta formatos comunes en orden de prioridad", () => {
     artist: "B",
   });
   // AzuraCast sin titulo separado: usa el texto completo.
-  assert.deepEqual(
-    extractMetadataSong({ now_playing: { song: { text: "B - A" } } }, null, null),
-    { title: "B - A", artist: null },
-  );
+  assert.deepEqual(extractMetadataSong({ now_playing: { song: { text: "B - A" } } }, null, null), {
+    title: "B - A",
+    artist: null,
+  });
   assert.deepEqual(extractMetadataSong({ currentSong: "Tema" }, null, null), {
     title: "Tema",
     artist: null,
@@ -183,7 +183,10 @@ test("extrae portada de AzuraCast y rechaza URLs no web", () => {
   assert.equal(extractMetadataArtwork({ art: "javascript:alert(1)" }, null), null);
   assert.equal(extractMetadataArtwork({ art: "ftp://files.example/a.jpg" }, null), null);
   assert.equal(extractMetadataArtwork({ art: "no es una url" }, null), null);
-  assert.equal(extractMetadataArtwork({ cover: "https://img.example" }, null), "https://img.example/");
+  assert.equal(
+    extractMetadataArtwork({ cover: "https://img.example" }, null),
+    "https://img.example/",
+  );
   assert.equal(extractMetadataArtwork({}, null), null);
 });
 
@@ -223,7 +226,10 @@ test("extractMetadataExtras lee fin de cancion y votacion del snapshot NEX y Azu
 
 test("extractMetadataExtras ignora tiempos invalidos y fases distintas de VOTING", () => {
   assert.equal(extractMetadataExtras({ now_playing: { ends_at_ms: Number.NaN } }).endsAt, null);
-  assert.equal(extractMetadataExtras({ now_playing: { ends_at_ms: "1790000000000" } }).endsAt, null);
+  assert.equal(
+    extractMetadataExtras({ now_playing: { ends_at_ms: "1790000000000" } }).endsAt,
+    null,
+  );
   assert.equal(
     extractMetadataExtras({ now_playing: { played_at: 1_790_000_000, duration: 0 } }).endsAt,
     null,

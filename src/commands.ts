@@ -33,5 +33,3 @@ export const commands = [
   statusCommand,
 ];
 export const commandsJson = commands.map((c) => c.toJSON());
-
-

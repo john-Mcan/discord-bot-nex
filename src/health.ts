@@ -23,12 +23,14 @@ export class HealthServer {
       if (path === "/healthz") {
         const healthy = this.client.isReady();
         response.writeHead(healthy ? 200 : 503, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({
-          status: healthy ? "ok" : "starting",
-          discordReady: healthy,
-          gatewayPingMs: this.client.ws.ping,
-          ...this.radio.getMetrics(),
-        }));
+        response.end(
+          JSON.stringify({
+            status: healthy ? "ok" : "starting",
+            discordReady: healthy,
+            gatewayPingMs: this.client.ws.ping,
+            ...this.radio.getMetrics(),
+          }),
+        );
         return;
       }
       if (path === "/metrics") {

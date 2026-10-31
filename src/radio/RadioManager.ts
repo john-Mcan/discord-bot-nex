@@ -75,12 +75,7 @@ const NOW_PLAYING_DEBOUNCE_MS = 300;
 // cancion empieza 1 s despues del ends_at de la anterior.
 const COUNTDOWN_DISPLAY_LAG_MS = 1_000;
 
-type SessionStatus =
-  | "connecting"
-  | "playing"
-  | "reconnecting"
-  | "stopping"
-  | "stopped";
+type SessionStatus = "connecting" | "playing" | "reconnecting" | "stopping" | "stopped";
 
 type BroadcastStatus = "idle" | "connecting" | "playing" | "reconnecting";
 
@@ -325,9 +320,11 @@ export async function downloadArtwork(
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const contentType = response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
+  const contentType =
+    response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
   const extension = ARTWORK_EXTENSIONS[contentType];
-  if (!extension) throw new Error(`Tipo de contenido no soportado: ${contentType || "desconocido"}`);
+  if (!extension)
+    throw new Error(`Tipo de contenido no soportado: ${contentType || "desconocido"}`);
   if (Number(response.headers.get("content-length")) > MAX_ARTWORK_BYTES) {
     throw new Error("La portada supera el tamano maximo");
   }
@@ -597,12 +594,16 @@ export class RadioManager {
       if (this.sessions.get(guild.id) !== session || session.status !== "playing") {
         throw new Error("La sesion termino antes de iniciar la reproduccion");
       }
-      await interaction.editReply(`Reproduciendo **${this.stationName}** en **${voiceChannel.name}**.`);
+      await interaction.editReply(
+        `Reproduciendo **${this.stationName}** en **${voiceChannel.name}**.`,
+      );
       await this.publishPersistentNowPlaying(session, true);
       this.requestIdleRefresh(session);
     } catch (error) {
       logger.error("play.failed", { ...sessionContext(session), error: errorMessage(error) });
-      await interaction.editReply(`No pude iniciar la radio: ${errorMessage(error)}`).catch(() => null);
+      await interaction
+        .editReply(`No pude iniciar la radio: ${errorMessage(error)}`)
+        .catch(() => null);
       if (this.sessions.get(guild.id) === session) await this.stopSession(session, "start_failed");
     }
   }
@@ -610,12 +611,18 @@ export class RadioManager {
   public async stop(interaction: ChatInputCommandInteraction): Promise<void> {
     const guild = interaction.guild;
     if (!guild) {
-      await interaction.reply({ content: "Este comando solo funciona en un servidor.", ephemeral: true });
+      await interaction.reply({
+        content: "Este comando solo funciona en un servidor.",
+        ephemeral: true,
+      });
       return;
     }
     const session = this.sessions.get(guild.id);
     if (!session || session.stopping) {
-      await interaction.reply({ content: "No hay una radio activa en este servidor.", ephemeral: true });
+      await interaction.reply({
+        content: "No hay una radio activa en este servidor.",
+        ephemeral: true,
+      });
       return;
     }
     const member = await this.resolveMember(interaction);
@@ -636,7 +643,10 @@ export class RadioManager {
   public async nowPlaying(interaction: ChatInputCommandInteraction): Promise<void> {
     const session = interaction.guildId ? this.sessions.get(interaction.guildId) : undefined;
     if (!session || session.stopping) {
-      await interaction.reply({ content: "No hay una radio activa en este servidor.", ephemeral: true });
+      await interaction.reply({
+        content: "No hay una radio activa en este servidor.",
+        ephemeral: true,
+      });
       return;
     }
     if (!(await this.defer(interaction))) return;
@@ -646,7 +656,10 @@ export class RadioManager {
   public async status(interaction: ChatInputCommandInteraction): Promise<void> {
     const session = interaction.guildId ? this.sessions.get(interaction.guildId) : undefined;
     if (!session || session.stopping) {
-      await interaction.reply({ content: "No hay una radio activa en este servidor.", ephemeral: true });
+      await interaction.reply({
+        content: "No hay una radio activa en este servidor.",
+        ephemeral: true,
+      });
       return;
     }
     const listeners = await this.humanListenerCount(session);
@@ -662,10 +675,26 @@ export class RadioManager {
         { name: "Canal", value: `<#${session.voiceChannelId}>`, inline: true },
         { name: "Oyentes", value: String(listeners), inline: true },
         { name: "Uptime", value: this.formatDuration(uptimeMs), inline: true },
-        { name: "Ping voz", value: `WS ${ping.ws ?? "—"} ms / UDP ${ping.udp ?? "—"} ms`, inline: true },
-        { name: "Reintentos", value: `Voz ${session.totalRetries} / Stream ${this.broadcastRetries}`, inline: true },
-        { name: "Metadata", value: this.metadataSource?.toUpperCase() ?? "No disponible", inline: true },
-        { name: "Ultimo audio", value: this.lastAudioAt ? `<t:${Math.floor(this.lastAudioAt / 1000)}:R>` : "—", inline: true },
+        {
+          name: "Ping voz",
+          value: `WS ${ping.ws ?? "—"} ms / UDP ${ping.udp ?? "—"} ms`,
+          inline: true,
+        },
+        {
+          name: "Reintentos",
+          value: `Voz ${session.totalRetries} / Stream ${this.broadcastRetries}`,
+          inline: true,
+        },
+        {
+          name: "Metadata",
+          value: this.metadataSource?.toUpperCase() ?? "No disponible",
+          inline: true,
+        },
+        {
+          name: "Ultimo audio",
+          value: this.lastAudioAt ? `<t:${Math.floor(this.lastAudioAt / 1000)}:R>` : "—",
+          inline: true,
+        },
       )
       .setTimestamp();
     if (lastError) embed.addFields({ name: "Ultimo error", value: lastError.slice(0, 1024) });
@@ -697,7 +726,9 @@ export class RadioManager {
 
   public async shutdown(): Promise<void> {
     if (this.presenceTimer) clearTimeout(this.presenceTimer);
-    await Promise.all([...this.sessions.values()].map((session) => this.stopSession(session, "shutdown")));
+    await Promise.all(
+      [...this.sessions.values()].map((session) => this.stopSession(session, "shutdown")),
+    );
     this.stopBroadcast();
   }
 
@@ -715,7 +746,9 @@ export class RadioManager {
     }
   }
 
-  private async resolveMember(interaction: ChatInputCommandInteraction): Promise<GuildMember | null> {
+  private async resolveMember(
+    interaction: ChatInputCommandInteraction,
+  ): Promise<GuildMember | null> {
     if (!interaction.guild) return null;
     if (interaction.member instanceof GuildMember) return interaction.member;
     return interaction.guild.members.fetch(interaction.user.id).catch(() => null);
@@ -811,10 +844,7 @@ export class RadioManager {
   private async startSession(session: GuildSession): Promise<void> {
     // La voz y el stream arrancan en paralelo; si el stream ya esta sonando
     // para otro servidor, solo hace falta conectar la voz.
-    await Promise.all([
-      this.ensureVoice(session, "initial_start", true),
-      this.ensureBroadcast(),
-    ]);
+    await Promise.all([this.ensureVoice(session, "initial_start", true), this.ensureBroadcast()]);
     if (session.stopping || this.sessions.get(session.guildId) !== session) {
       throw new Error("La sesion ya no esta activa");
     }
@@ -849,7 +879,11 @@ export class RadioManager {
     }
   }
 
-  private async recoverVoice(session: GuildSession, reason: string, initial: boolean): Promise<void> {
+  private async recoverVoice(
+    session: GuildSession,
+    reason: string,
+    initial: boolean,
+  ): Promise<void> {
     let lastError = reason;
     for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
       if (session.stopping || this.sessions.get(session.guildId) !== session) {
@@ -898,10 +932,7 @@ export class RadioManager {
     if (session.connection.state.status === VoiceConnectionStatus.Ready) return;
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      if (
-        session.connection.state.status === VoiceConnectionStatus.Disconnected ||
-        attempt > 1
-      ) {
+      if (session.connection.state.status === VoiceConnectionStatus.Disconnected || attempt > 1) {
         const accepted = session.connection.rejoin();
         if (!accepted) throw new Error("Discord rechazo el reingreso al canal de voz");
       }
@@ -984,7 +1015,8 @@ export class RadioManager {
         this.broadcastStatus = "playing";
         this.lastStreamError = null;
         logger.info("stream.playing", { attempt, sessions: this.sessions.size });
-        for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
+        for (const session of this.sessions.values())
+          this.schedulePersistentNowPlayingUpdate(session);
         return;
       } catch (error) {
         if (!stillCurrent()) throw new Error("La radio se detuvo", { cause: error });
@@ -1016,16 +1048,15 @@ export class RadioManager {
     this.icy = handle;
     this.lastAudioAt = Date.now();
     this.stationName =
-      this.config.stationName ??
-      headerValue(handle.res.headers["icy-name"]) ??
-      "Radio";
+      this.config.stationName ?? headerValue(handle.res.headers["icy-name"]) ?? "Radio";
 
     if (handle.demuxer) {
       handle.demuxer.on("metadata", (metadata: Buffer) => {
         if (generation !== this.streamGeneration) return;
         try {
           const title = parseIcyMetadata(metadata);
-          if (title) this.handleMetadata({ source: "icy", label: title, song: splitIcyTitle(title) });
+          if (title)
+            this.handleMetadata({ source: "icy", label: title, song: splitIcyTitle(title) });
         } catch (error) {
           logger.warn("metadata.icy_parse_failed", { error: errorMessage(error) });
         }
@@ -1094,7 +1125,8 @@ export class RadioManager {
 
   private stopBroadcast(): void {
     this.cancelBroadcastLinger();
-    if (this.broadcastStatus === "idle" && !this.broadcastStartPromise && !this.metadataPolling) return;
+    if (this.broadcastStatus === "idle" && !this.broadcastStartPromise && !this.metadataPolling)
+      return;
     this.broadcastEpoch += 1;
     this.broadcastStatus = "idle";
     this.broadcastStartPromise = undefined;
@@ -1181,7 +1213,8 @@ export class RadioManager {
       source === "icy" &&
       this.metadataSource === "json" &&
       Date.now() - this.metadataUpdatedAt < this.config.metadataPollSeconds * 2_000
-    ) return;
+    )
+      return;
     const titleChanged = title !== this.currentTitle;
     const artworkChanged = artworkUrl !== undefined && artworkUrl !== this.currentArtworkUrl;
     // ICY no trae tiempos ni votacion: si cambia la cancion por ICY, los datos
@@ -1399,7 +1432,10 @@ export class RadioManager {
       await session.nowPlayingMessage
         .edit({ ...payload, attachments: [] })
         .catch((error: unknown) => {
-          logger.warn("now_playing.edit_failed", { ...sessionContext(session), error: errorMessage(error) });
+          logger.warn("now_playing.edit_failed", {
+            ...sessionContext(session),
+            error: errorMessage(error),
+          });
           session.nowPlayingMessage = undefined;
         });
       return;
@@ -1410,10 +1446,7 @@ export class RadioManager {
     session.nowPlayingMessage = await channel
       .send({ ...payload, allowedMentions: { parse: [] } })
       .catch(() => undefined);
-    if (
-      session.nowPlayingMessage &&
-      this.metadataUpdatedAt !== metadataUpdatedAt
-    ) {
+    if (session.nowPlayingMessage && this.metadataUpdatedAt !== metadataUpdatedAt) {
       this.schedulePersistentNowPlayingUpdate(session);
     }
   }
@@ -1451,7 +1484,9 @@ export class RadioManager {
     lines.push(details.join("  ·  "));
     if (extras.voted) lines.push("🗳️ Elegida por votación de la comunidad");
     if (extras.votingOpen && this.config.websiteUrl) {
-      lines.push(`🗳️ Votación abierta: elige la próxima en [${this.websiteLabel()}](${this.config.websiteUrl})`);
+      lines.push(
+        `🗳️ Votación abierta: elige la próxima en [${this.websiteLabel()}](${this.config.websiteUrl})`,
+      );
     }
     embed.setDescription(lines.join("\n"));
     return {
@@ -1486,7 +1521,10 @@ export class RadioManager {
       .catch(() => null);
   }
 
-  private authorLine(state: string, logo: Artwork | null): { name: string; iconURL?: string; url?: string } {
+  private authorLine(
+    state: string,
+    logo: Artwork | null,
+  ): { name: string; iconURL?: string; url?: string } {
     return {
       name: truncate(`${this.stationName} · ${state}`, 256),
       ...(logo ? { iconURL: `attachment://${logo.fileName}` } : {}),
@@ -1663,16 +1701,18 @@ export class RadioManager {
   }
 
   private stopReasonLabel(reason: string): string {
-    return {
-      command: "comando /stop",
-      manual_disconnect: "desconexión manual desde Discord",
-      idle_timeout: "canal sin oyentes",
-      retries_exhausted: "fallos de conexión",
-      start_failed: "no se pudo iniciar",
-      shutdown: "apagado del bot",
-      replaced: "sesión trasladada",
-      connection_destroyed: "conexión cerrada",
-    }[reason] ?? reason;
+    return (
+      {
+        command: "comando /stop",
+        manual_disconnect: "desconexión manual desde Discord",
+        idle_timeout: "canal sin oyentes",
+        retries_exhausted: "fallos de conexión",
+        start_failed: "no se pudo iniciar",
+        shutdown: "apagado del bot",
+        replaced: "sesión trasladada",
+        connection_destroyed: "conexión cerrada",
+      }[reason] ?? reason
+    );
   }
 
   private connectionIsDestroyed(connection: VoiceConnection): boolean {

@@ -55,7 +55,10 @@ test("HealthServer expone health JSON y metricas Prometheus", async () => {
     });
 
     const metricsResponse = await fetch(`http://127.0.0.1:${port}/metrics`);
-    assert.match(metricsResponse.headers.get("content-type") ?? "", /^text\/plain; version=0\.0\.4/);
+    assert.match(
+      metricsResponse.headers.get("content-type") ?? "",
+      /^text\/plain; version=0\.0\.4/,
+    );
     const metrics = await metricsResponse.text();
     assert.match(metrics, /discord_bot_nex_playing_sessions 1/);
     assert.match(metrics, /discord_bot_nex_stream_retries_total 3/);
