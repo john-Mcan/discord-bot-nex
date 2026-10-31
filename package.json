@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "description": "Discord radio/music bot",
+  "license": "MIT",
+  "author": "John Moya C.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/john-Mcan/discord-bot-nex.git"
+  },
+  "homepage": "https://github.com/john-Mcan/discord-bot-nex#readme",
+  "bugs": {
+    "url": "https://github.com/john-Mcan/discord-bot-nex/issues"
+  },
   "main": "dist/index.js",
   "engines": {
     "node": ">=22.12.0"
