@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint, tipos, tests y build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      # npm ci respeta el .npmrc del repo (legacy-peer-deps=true): ver el
+      # motivo en ese archivo. También descarga el binario de ffmpeg-static,
+      # que usa el test de integración de la transmisión.
+      - run: npm ci
+
+      - run: npm run check
