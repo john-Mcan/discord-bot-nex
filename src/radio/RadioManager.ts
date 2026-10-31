@@ -29,7 +29,7 @@ import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
 import { errorMessage } from "../errors";
 import { logger } from "../logger";
-import { CoverCache, loadStationLogo, type Artwork } from "./artwork";
+import { loadStationLogo, type Artwork } from "./artwork";
 import { MAX_START_ATTEMPTS, retryDelayMs, sleep } from "./backoff";
 import {
   AUDIO_HIGH_WATER_MARK,
@@ -38,18 +38,8 @@ import {
   parseIcyMetadata,
   type IcyHandle,
 } from "./icy";
-import {
-  EMPTY_EXTRAS,
-  extractMetadataArtwork,
-  extractMetadataExtras,
-  extractMetadataSong,
-  inferAzuraCastMetadataUrl,
-  nextMetadataPollDelay,
-  songLabel,
-  splitIcyTitle,
-  type MetadataExtras,
-  type SongInfo,
-} from "./metadata";
+import { inferAzuraCastMetadataUrl } from "./metadata";
+import { MetadataTracker, type MetadataChange } from "./MetadataTracker";
 import {
   buildNowPlayingPayload,
   buildStatusEmbed,
@@ -69,8 +59,6 @@ const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
 
 type BroadcastStatus = "idle" | "connecting" | "playing" | "reconnecting";
-
-type MetadataSource = "icy" | "json" | null;
 
 type SendableChannel = {
   send: (options: {
@@ -109,13 +97,12 @@ export class RadioManager {
   private readonly commandCounts = new Map<string, number>();
   private streamFailures = 0;
   private totalRetries = 0;
-  private metadataUpdates = 0;
   private pendingPresenceTitle: string | null = null;
   private publishedPresenceTitle: string | null = null;
   private lastPresenceAt = 0;
   private presenceTimer?: NodeJS.Timeout;
   private stationLogoPromise?: Promise<Artwork | null>;
-  private readonly metadataUrl: string | null;
+  private readonly metadata: MetadataTracker;
 
   // Transmision compartida: un solo stream HTTP y un solo reproductor (y por
   // tanto un solo FFmpeg) alimentan las conexiones de voz de todos los servidores.
@@ -132,23 +119,18 @@ export class RadioManager {
   private lastAudioAt: number | null = null;
   private stationName: string;
 
-  // Metadata compartida: una sola consulta y una sola descarga de portada
-  // por cancion, sin importar cuantos servidores esten escuchando.
-  private currentTitle: string | null = null;
-  private currentSong: SongInfo | null = null;
-  private currentExtras: MetadataExtras = EMPTY_EXTRAS;
-  private currentArtworkUrl: string | null = null;
-  private metadataSource: MetadataSource = null;
-  private metadataUpdatedAt = 0;
-  private metadataTimer?: NodeJS.Timeout;
-  private metadataPolling = false;
-  private readonly covers = new CoverCache((url) => url === this.currentArtworkUrl);
-
   constructor(
     private readonly client: Client,
     private readonly config: RadioManagerConfig,
   ) {
-    this.metadataUrl = config.metadataUrl ?? inferAzuraCastMetadataUrl(config.streamUrl);
+    this.metadata = new MetadataTracker({
+      url: config.metadataUrl ?? inferAzuraCastMetadataUrl(config.streamUrl),
+      titlePath: config.metadataTitlePath,
+      artistPath: config.metadataArtistPath,
+      artworkPath: config.metadataArtworkPath,
+      pollSeconds: config.metadataPollSeconds,
+      onChange: (change) => this.onMetadataChange(change),
+    });
     this.stationName = config.stationName ?? "Radio";
   }
 
@@ -164,7 +146,7 @@ export class RadioManager {
       reconnectingSessions: statuses.filter((status) => status === "reconnecting").length,
       streamFailures: this.streamFailures,
       totalRetries: this.totalRetries,
-      metadataUpdates: this.metadataUpdates,
+      metadataUpdates: this.metadata.updates,
       commands: Object.fromEntries(this.commandCounts),
     };
   }
@@ -330,7 +312,7 @@ export class RadioManager {
       ping: session.connection.ping,
       voiceRetries: session.totalRetries,
       streamRetries: this.broadcastRetries,
-      metadataSource: this.metadataSource,
+      metadataSource: this.metadata.source,
       lastAudioAt: this.lastAudioAt,
       lastError: session.lastError ?? this.lastStreamError,
     });
@@ -629,7 +611,7 @@ export class RadioManager {
     // intento espera, la epoca cambia y este intento abandona sin tocar nada.
     const epoch = this.broadcastEpoch;
     const stillCurrent = () => epoch === this.broadcastEpoch;
-    this.startMetadataPolling();
+    this.metadata.start();
     let lastError = reason;
     for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
       if (attempt > 1 || !initial) {
@@ -691,8 +673,7 @@ export class RadioManager {
         if (generation !== this.streamGeneration) return;
         try {
           const title = parseIcyMetadata(metadata);
-          if (title)
-            this.handleMetadata({ source: "icy", label: title, song: splitIcyTitle(title) });
+          if (title) this.metadata.handleIcyTitle(title);
         } catch (error) {
           logger.warn("metadata.icy_parse_failed", { error: errorMessage(error) });
         }
@@ -761,7 +742,7 @@ export class RadioManager {
 
   private stopBroadcast(): void {
     this.cancelBroadcastLinger();
-    if (this.broadcastStatus === "idle" && !this.broadcastStartPromise && !this.metadataPolling)
+    if (this.broadcastStatus === "idle" && !this.broadcastStartPromise && !this.metadata.polling)
       return;
     this.broadcastEpoch += 1;
     this.broadcastStatus = "idle";
@@ -769,117 +750,27 @@ export class RadioManager {
     this.broadcastRetries = 0;
     this.lastStreamError = null;
     this.closeStream();
-    this.stopMetadataPolling();
     try {
       this.player?.stop(true);
     } catch {
       // Already stopped.
     }
     this.lastAudioAt = null;
-    this.currentTitle = null;
-    this.currentSong = null;
-    this.currentExtras = EMPTY_EXTRAS;
-    this.currentArtworkUrl = null;
-    this.metadataSource = null;
-    this.metadataUpdatedAt = 0;
-    this.covers.clear();
+    this.metadata.stop();
     logger.info("broadcast.stopped");
   }
 
-  private startMetadataPolling(): void {
-    if (!this.metadataUrl || this.metadataPolling) return;
-    this.metadataPolling = true;
-    const epoch = this.broadcastEpoch;
-    const poll = async () => {
-      this.metadataTimer = undefined;
-      if (epoch !== this.broadcastEpoch || !this.metadataUrl) return;
-      let delayMs = this.config.metadataPollSeconds * 1000;
-      try {
-        const response = await fetch(this.metadataUrl, {
-          headers: { Accept: "application/json", "User-Agent": "discord-bot-nex/0.2" },
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const body = await response.text();
-        if (body.length > 1_000_000) throw new Error("La respuesta de metadata supera 1 MB");
-        const payload: unknown = JSON.parse(body);
-        if (epoch !== this.broadcastEpoch) return;
-        const song = extractMetadataSong(
-          payload,
-          this.config.metadataTitlePath,
-          this.config.metadataArtistPath,
-        );
-        if (song) {
-          this.handleMetadata({
-            source: "json",
-            label: songLabel(song),
-            song,
-            artworkUrl: extractMetadataArtwork(payload, this.config.metadataArtworkPath),
-            extras: extractMetadataExtras(payload),
-          });
-        }
-        delayMs = nextMetadataPollDelay(payload, delayMs);
-      } catch (error) {
-        logger.warn("metadata.poll_failed", { error: errorMessage(error) });
-      }
-      if (epoch !== this.broadcastEpoch) return;
-      this.metadataTimer = setTimeout(() => void poll(), delayMs);
-    };
-    void poll();
-  }
-
-  private stopMetadataPolling(): void {
-    if (this.metadataTimer) clearTimeout(this.metadataTimer);
-    this.metadataTimer = undefined;
-    this.metadataPolling = false;
-  }
-
-  private handleMetadata(update: {
-    source: Exclude<MetadataSource, null>;
-    label: string;
-    song: SongInfo;
-    artworkUrl?: string | null;
-    extras?: MetadataExtras;
-  }): void {
-    const { source, artworkUrl } = update;
-    const title = update.label.replace(/\0/g, "").trim().slice(0, 300);
-    if (!title) return;
-    if (
-      source === "icy" &&
-      this.metadataSource === "json" &&
-      Date.now() - this.metadataUpdatedAt < this.config.metadataPollSeconds * 2_000
-    )
-      return;
-    const titleChanged = title !== this.currentTitle;
-    const artworkChanged = artworkUrl !== undefined && artworkUrl !== this.currentArtworkUrl;
-    // ICY no trae tiempos ni votacion: si cambia la cancion por ICY, los datos
-    // del snapshot anterior ya no aplican.
-    const extras = update.extras ?? (titleChanged ? EMPTY_EXTRAS : this.currentExtras);
-    const extrasChanged =
-      extras.endsAt !== this.currentExtras.endsAt ||
-      extras.voted !== this.currentExtras.voted ||
-      extras.votingOpen !== this.currentExtras.votingOpen;
-    if (!titleChanged && !artworkChanged && !extrasChanged && source === this.metadataSource) {
-      if (source === "json") this.metadataUpdatedAt = Date.now();
-      return;
-    }
-    this.currentTitle = title;
-    this.currentSong = update.song;
-    this.currentExtras = extras;
-    if (artworkUrl !== undefined) this.currentArtworkUrl = artworkUrl;
-    this.metadataSource = source;
-    this.metadataUpdatedAt = Date.now();
-    this.metadataUpdates += 1;
+  private onMetadataChange({ source, title, artworkChanged }: MetadataChange): void {
     logger.info("metadata.updated", {
       source,
       title,
-      hasArtwork: Boolean(this.currentArtworkUrl),
+      hasArtwork: Boolean(this.metadata.artworkUrl),
       sessions: this.sessions.size,
     });
     if (this.sessions.size > 0) {
       this.schedulePresence(title);
       // La portada empieza a bajar ya, en paralelo con la espera de la edicion.
-      if (artworkChanged) void this.covers.resolve(this.currentArtworkUrl, true);
+      if (artworkChanged) void this.metadata.cover(true);
     }
     for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
   }
@@ -913,8 +804,8 @@ export class RadioManager {
 
   private syncPresence(): void {
     const active = [...this.sessions.values()].some((session) => !session.stopping);
-    if (active && this.currentTitle) {
-      this.schedulePresence(this.currentTitle);
+    if (active && this.metadata.title) {
+      this.schedulePresence(this.metadata.title);
       return;
     }
     this.pendingPresenceTitle = null;
@@ -1057,7 +948,7 @@ export class RadioManager {
   }
 
   private async publishPersistentNowPlaying(session: GuildSession, create: boolean): Promise<void> {
-    const metadataUpdatedAt = this.metadataUpdatedAt;
+    const metadataUpdatedAt = this.metadata.updatedAt;
     const revision = ++session.nowPlayingRevision;
     const payload = await this.buildNowPlayingPayload(session);
     // Descargar la portada puede tardar: si mientras tanto empezo otra
@@ -1081,17 +972,17 @@ export class RadioManager {
     session.nowPlayingMessage = await channel
       .send({ ...payload, allowedMentions: { parse: [] } })
       .catch(() => undefined);
-    if (session.nowPlayingMessage && this.metadataUpdatedAt !== metadataUpdatedAt) {
+    if (session.nowPlayingMessage && this.metadata.updatedAt !== metadataUpdatedAt) {
       this.schedulePersistentNowPlayingUpdate(session);
     }
   }
 
   private async buildNowPlayingPayload(session: GuildSession): Promise<EmbedPayload> {
-    const song = this.currentSong;
-    const extras = this.currentExtras;
+    const song = this.metadata.song;
+    const extras = this.metadata.extras;
     const [listeners, cover, logo] = await Promise.all([
       this.humanListenerCount(session),
-      this.covers.resolve(this.currentArtworkUrl, true),
+      this.metadata.cover(true),
       this.stationLogo(),
     ]);
     return buildNowPlayingPayload({
@@ -1109,11 +1000,8 @@ export class RadioManager {
   private async updatePersistentAsStopped(session: GuildSession, reason: string): Promise<void> {
     if (!session.nowPlayingMessage) return;
     // Sin descarga: no retrasamos la desconexion esperando a la red.
-    const [cover, logo] = await Promise.all([
-      this.covers.resolve(this.currentArtworkUrl, false),
-      this.stationLogo(),
-    ]);
-    const payload = buildStoppedPayload(this.station(), reason, this.currentSong, cover, logo);
+    const [cover, logo] = await Promise.all([this.metadata.cover(false), this.stationLogo()]);
+    const payload = buildStoppedPayload(this.station(), reason, this.metadata.song, cover, logo);
     await session.nowPlayingMessage.edit({ ...payload, attachments: [] }).catch(() => null);
   }
 
