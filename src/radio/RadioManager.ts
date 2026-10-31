@@ -1,13 +1,7 @@
 import {
-  AudioPlayerStatus,
-  NoSubscriberBehavior,
-  StreamType,
   VoiceConnectionStatus,
-  createAudioPlayer,
-  createAudioResource,
   entersState,
   joinVoiceChannel,
-  type AudioPlayer,
   type DiscordGatewayAdapterCreator,
   type VoiceConnection,
 } from "@discordjs/voice";
@@ -25,18 +19,11 @@ import {
   type VoiceState,
 } from "discord.js";
 import { randomUUID } from "node:crypto";
-import { PassThrough } from "node:stream";
 import { errorMessage } from "../errors";
 import { logger } from "../logger";
 import { loadStationLogo, type Artwork } from "./artwork";
 import { MAX_START_ATTEMPTS, retryDelayMs, sleep } from "./backoff";
-import {
-  AUDIO_HIGH_WATER_MARK,
-  headerValue,
-  openIcyStream,
-  parseIcyMetadata,
-  type IcyHandle,
-} from "./icy";
+import { Broadcast } from "./Broadcast";
 import { inferAzuraCastMetadataUrl } from "./metadata";
 import { MetadataTracker, type MetadataChange } from "./MetadataTracker";
 import {
@@ -50,14 +37,8 @@ import {
 import { Presence } from "./presence";
 import { sessionContext, type GuildSession, type SessionStatus } from "./session";
 
-const PLAYER_START_TIMEOUT_MS = 20_000;
 const CONNECTION_READY_TIMEOUT_MS = 20_000;
-const STREAM_STALL_TIMEOUT_MS = 45_000;
-const STREAM_WATCHDOG_INTERVAL_MS = 15_000;
-const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
-
-type BroadcastStatus = "idle" | "connecting" | "playing" | "reconnecting";
 
 type SendableChannel = {
   send: (options: {
@@ -94,26 +75,11 @@ export type RadioMetrics = {
 export class RadioManager {
   private readonly sessions = new Map<string, GuildSession>();
   private readonly commandCounts = new Map<string, number>();
-  private streamFailures = 0;
-  private totalRetries = 0;
+  private voiceRetries = 0;
   private stationLogoPromise?: Promise<Artwork | null>;
   private readonly metadata: MetadataTracker;
   private readonly presence: Presence;
-
-  // Transmision compartida: un solo stream HTTP y un solo reproductor (y por
-  // tanto un solo FFmpeg) alimentan las conexiones de voz de todos los servidores.
-  private player?: AudioPlayer;
-  private broadcastStatus: BroadcastStatus = "idle";
-  private broadcastEpoch = 0;
-  private broadcastStartPromise?: Promise<void>;
-  private broadcastLingerTimer?: NodeJS.Timeout;
-  private broadcastRetries = 0;
-  private lastStreamError: string | null = null;
-  private icy?: IcyHandle;
-  private streamGeneration = 0;
-  private watchdogTimer?: NodeJS.Timeout;
-  private lastAudioAt: number | null = null;
-  private stationName: string;
+  private readonly broadcast: Broadcast;
 
   constructor(
     private readonly client: Client,
@@ -128,7 +94,21 @@ export class RadioManager {
       pollSeconds: config.metadataPollSeconds,
       onChange: (change) => this.onMetadataChange(change),
     });
-    this.stationName = config.stationName ?? "Radio";
+    this.broadcast = new Broadcast(config, this.metadata, {
+      sessionCount: () => this.sessions.size,
+      notify: (content) => this.broadcastText(content),
+      onPlaying: () => {
+        for (const session of this.sessions.values())
+          this.schedulePersistentNowPlayingUpdate(session);
+      },
+      onRetriesExhausted: async () => {
+        await Promise.all(
+          [...this.sessions.values()].map((session) =>
+            this.stopSession(session, "retries_exhausted"),
+          ),
+        );
+      },
+    });
   }
 
   public recordCommand(command: string): void {
@@ -141,8 +121,8 @@ export class RadioManager {
       sessions: statuses.length,
       playingSessions: statuses.filter((status) => status === "playing").length,
       reconnectingSessions: statuses.filter((status) => status === "reconnecting").length,
-      streamFailures: this.streamFailures,
-      totalRetries: this.totalRetries,
+      streamFailures: this.broadcast.failures,
+      totalRetries: this.voiceRetries + this.broadcast.totalRetries,
       metadataUpdates: this.metadata.updates,
       commands: Object.fromEntries(this.commandCounts),
     };
@@ -232,7 +212,7 @@ export class RadioManager {
         throw new Error("La sesion termino antes de iniciar la reproduccion");
       }
       await interaction.editReply(
-        `Reproduciendo **${this.stationName}** en **${voiceChannel.name}**.`,
+        `Reproduciendo **${this.broadcast.stationName}** en **${voiceChannel.name}**.`,
       );
       await this.publishPersistentNowPlaying(session, true);
       this.requestIdleRefresh(session);
@@ -301,17 +281,17 @@ export class RadioManager {
     }
     const listeners = await this.humanListenerCount(session);
     const embed = buildStatusEmbed({
-      stationName: this.stationName,
+      stationName: this.broadcast.stationName,
       status: this.effectiveStatus(session),
       voiceChannelId: session.voiceChannelId,
       listeners,
       uptimeMs: Date.now() - session.createdAt,
       ping: session.connection.ping,
       voiceRetries: session.totalRetries,
-      streamRetries: this.broadcastRetries,
+      streamRetries: this.broadcast.retries,
       metadataSource: this.metadata.source,
-      lastAudioAt: this.lastAudioAt,
-      lastError: session.lastError ?? this.lastStreamError,
+      lastAudioAt: this.broadcast.lastAudioAt,
+      lastError: session.lastError ?? this.broadcast.lastError,
     });
     await interaction.reply({ embeds: [embed] });
   }
@@ -344,7 +324,7 @@ export class RadioManager {
     await Promise.all(
       [...this.sessions.values()].map((session) => this.stopSession(session, "shutdown")),
     );
-    this.stopBroadcast();
+    this.broadcast.stop();
   }
 
   private async defer(interaction: ChatInputCommandInteraction): Promise<boolean> {
@@ -390,7 +370,7 @@ export class RadioManager {
       createdAt: Date.now(),
       status: "connecting",
       connection,
-      subscription: connection.subscribe(this.ensurePlayer()),
+      subscription: connection.subscribe(this.broadcast.ensurePlayer()),
       idleGeneration: 0,
       idleRefreshRequested: false,
       totalRetries: 0,
@@ -433,33 +413,10 @@ export class RadioManager {
     });
   }
 
-  private ensurePlayer(): AudioPlayer {
-    if (this.player) return this.player;
-    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Play } });
-    player.on("error", (error) => {
-      this.requestStreamRecovery(`Error del reproductor: ${error.message}`);
-    });
-    player.on("stateChange", (oldState, newState) => {
-      logger.info("player.state_changed", {
-        previousState: oldState.status,
-        nextState: newState.status,
-      });
-      if (
-        this.broadcastStatus !== "idle" &&
-        oldState.status !== AudioPlayerStatus.Idle &&
-        newState.status === AudioPlayerStatus.Idle
-      ) {
-        this.requestStreamRecovery("El stream termino o dejo de entregar audio");
-      }
-    });
-    this.player = player;
-    return player;
-  }
-
   private async startSession(session: GuildSession): Promise<void> {
     // La voz y el stream arrancan en paralelo; si el stream ya esta sonando
     // para otro servidor, solo hace falta conectar la voz.
-    await Promise.all([this.ensureVoice(session, "initial_start", true), this.ensureBroadcast()]);
+    await Promise.all([this.ensureVoice(session, "initial_start", true), this.broadcast.ensure()]);
     if (session.stopping || this.sessions.get(session.guildId) !== session) {
       throw new Error("La sesion ya no esta activa");
     }
@@ -507,7 +464,7 @@ export class RadioManager {
       if (attempt > 1 || !initial) {
         session.status = "reconnecting";
         session.totalRetries += 1;
-        this.totalRetries += 1;
+        this.voiceRetries += 1;
         await this.sendText(
           session,
           `La radio perdio la conexion. Reintentando (${attempt}/${MAX_START_ATTEMPTS})...`,
@@ -563,198 +520,6 @@ export class RadioManager {
       }
     }
     throw new Error("Timeout esperando la conexion de voz");
-  }
-
-  private ensureBroadcast(): Promise<void> {
-    this.cancelBroadcastLinger();
-    if (this.broadcastStatus === "playing") return Promise.resolve();
-    return this.broadcastStartPromise ?? this.runBroadcast("initial_start", true);
-  }
-
-  private requestStreamRecovery(reason: string): void {
-    if (this.broadcastStatus === "idle" || this.broadcastStartPromise) return;
-    this.streamFailures += 1;
-    this.lastStreamError = reason;
-    logger.warn("stream.failure", { reason, sessions: this.sessions.size });
-    if (this.sessions.size === 0) {
-      this.stopBroadcast();
-      return;
-    }
-    void this.runBroadcast(reason, false).catch((error) => {
-      logger.error("stream.recovery_failed", { error: errorMessage(error) });
-    });
-  }
-
-  private async runBroadcast(reason: string, initial: boolean): Promise<void> {
-    const task = this.recoverBroadcast(reason, initial);
-    this.broadcastStartPromise = task;
-    try {
-      await task;
-    } finally {
-      if (this.broadcastStartPromise === task) {
-        this.broadcastStartPromise = undefined;
-        if (
-          this.broadcastStatus === "playing" &&
-          this.player?.state.status === AudioPlayerStatus.Idle
-        ) {
-          this.requestStreamRecovery("El stream termino inmediatamente despues de iniciar");
-        }
-      }
-    }
-  }
-
-  private async recoverBroadcast(reason: string, initial: boolean): Promise<void> {
-    // Si la transmision se detiene (y quiza vuelve a arrancar) mientras este
-    // intento espera, la epoca cambia y este intento abandona sin tocar nada.
-    const epoch = this.broadcastEpoch;
-    const stillCurrent = () => epoch === this.broadcastEpoch;
-    this.metadata.start();
-    let lastError = reason;
-    for (let attempt = 1; attempt <= MAX_START_ATTEMPTS; attempt += 1) {
-      if (attempt > 1 || !initial) {
-        this.broadcastStatus = "reconnecting";
-        this.broadcastRetries += 1;
-        this.totalRetries += 1;
-        await this.broadcastText(
-          `La radio perdio la conexion. Reintentando (${attempt}/${MAX_START_ATTEMPTS})...`,
-        );
-        await sleep(retryDelayMs(attempt));
-      } else {
-        this.broadcastStatus = "connecting";
-      }
-      if (!stillCurrent()) throw new Error("La radio se detuvo");
-
-      try {
-        await this.startStream();
-        if (!stillCurrent()) throw new Error("La radio se detuvo");
-        this.broadcastStatus = "playing";
-        this.lastStreamError = null;
-        logger.info("stream.playing", { attempt, sessions: this.sessions.size });
-        for (const session of this.sessions.values())
-          this.schedulePersistentNowPlayingUpdate(session);
-        return;
-      } catch (error) {
-        if (!stillCurrent()) throw new Error("La radio se detuvo", { cause: error });
-        lastError = errorMessage(error);
-        this.lastStreamError = lastError;
-        logger.warn("stream.start_attempt_failed", { attempt, error: lastError });
-        this.closeStream();
-      }
-    }
-
-    await this.broadcastText("No pude mantener la radio activa y me desconectare.");
-    await Promise.all(
-      [...this.sessions.values()].map((session) => this.stopSession(session, "retries_exhausted")),
-    );
-    if (stillCurrent()) this.stopBroadcast();
-    throw new Error(lastError);
-  }
-
-  private async startStream(): Promise<void> {
-    this.closeStream();
-    const generation = ++this.streamGeneration;
-    const handle = await openIcyStream(this.config.streamUrl);
-    if (generation !== this.streamGeneration) {
-      handle.req.destroy();
-      handle.res.destroy();
-      handle.audioStream.destroy();
-      throw new Error("El inicio del stream fue reemplazado");
-    }
-    this.icy = handle;
-    this.lastAudioAt = Date.now();
-    this.stationName =
-      this.config.stationName ?? headerValue(handle.res.headers["icy-name"]) ?? "Radio";
-
-    if (handle.demuxer) {
-      handle.demuxer.on("metadata", (metadata: Buffer) => {
-        if (generation !== this.streamGeneration) return;
-        try {
-          const title = parseIcyMetadata(metadata);
-          if (title) this.metadata.handleIcyTitle(title);
-        } catch (error) {
-          logger.warn("metadata.icy_parse_failed", { error: errorMessage(error) });
-        }
-      });
-    }
-
-    const passThrough = new PassThrough({ highWaterMark: AUDIO_HIGH_WATER_MARK });
-    passThrough.on("data", () => {
-      if (generation === this.streamGeneration) this.lastAudioAt = Date.now();
-    });
-    const fail = (error: Error) => {
-      if (generation !== this.streamGeneration) return;
-      passThrough.destroy(error);
-      this.requestStreamRecovery(`Fallo del stream HTTP: ${error.message}`);
-    };
-    handle.audioStream.on("error", fail);
-    handle.res.on("aborted", () => fail(new Error("Respuesta HTTP abortada")));
-    handle.audioStream.pipe(passThrough);
-
-    this.watchdogTimer = setInterval(() => {
-      if (
-        generation === this.streamGeneration &&
-        this.lastAudioAt &&
-        Date.now() - this.lastAudioAt > STREAM_STALL_TIMEOUT_MS
-      ) {
-        fail(new Error("El stream no entrego audio durante 45 segundos"));
-      }
-    }, STREAM_WATCHDOG_INTERVAL_MS);
-
-    const player = this.ensurePlayer();
-    player.play(createAudioResource(passThrough, { inputType: StreamType.Arbitrary }));
-    await entersState(player, AudioPlayerStatus.Playing, PLAYER_START_TIMEOUT_MS);
-  }
-
-  private closeStream(): void {
-    this.streamGeneration += 1;
-    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
-    this.watchdogTimer = undefined;
-    const handle = this.icy;
-    this.icy = undefined;
-    if (!handle) return;
-    try {
-      handle.res.unpipe();
-      handle.audioStream.destroy();
-      handle.res.destroy();
-      handle.req.destroy();
-    } catch (error) {
-      logger.warn("stream.close_failed", { error: errorMessage(error) });
-    }
-  }
-
-  private scheduleBroadcastShutdown(): void {
-    // Margen antes de cortar el stream: un /play poco despues (o un traslado
-    // de canal) reutiliza la transmision en vez de reabrirla.
-    if (this.sessions.size > 0 || this.broadcastLingerTimer) return;
-    this.broadcastLingerTimer = setTimeout(() => {
-      this.broadcastLingerTimer = undefined;
-      if (this.sessions.size === 0) this.stopBroadcast();
-    }, BROADCAST_LINGER_MS);
-  }
-
-  private cancelBroadcastLinger(): void {
-    if (this.broadcastLingerTimer) clearTimeout(this.broadcastLingerTimer);
-    this.broadcastLingerTimer = undefined;
-  }
-
-  private stopBroadcast(): void {
-    this.cancelBroadcastLinger();
-    if (this.broadcastStatus === "idle" && !this.broadcastStartPromise && !this.metadata.polling)
-      return;
-    this.broadcastEpoch += 1;
-    this.broadcastStatus = "idle";
-    this.broadcastStartPromise = undefined;
-    this.broadcastRetries = 0;
-    this.lastStreamError = null;
-    this.closeStream();
-    try {
-      this.player?.stop(true);
-    } catch {
-      // Already stopped.
-    }
-    this.lastAudioAt = null;
-    this.metadata.stop();
-    logger.info("broadcast.stopped");
   }
 
   private onMetadataChange({ source, title, artworkChanged }: MetadataChange): void {
@@ -874,7 +639,7 @@ export class RadioManager {
     await this.updatePersistentAsStopped(session, reason);
     session.status = "stopped";
     if (this.sessions.get(session.guildId) === session) this.sessions.delete(session.guildId);
-    this.scheduleBroadcastShutdown();
+    this.broadcast.scheduleShutdown();
     this.syncPresence();
     logger.info("session.stopped", { ...sessionContext(session), reason });
   }
@@ -967,7 +732,7 @@ export class RadioManager {
   }
 
   private station(): Station {
-    return { name: this.stationName, websiteUrl: this.config.websiteUrl };
+    return { name: this.broadcast.stationName, websiteUrl: this.config.websiteUrl };
   }
 
   private stationLogo(): Promise<Artwork | null> {
@@ -977,8 +742,8 @@ export class RadioManager {
 
   private effectiveStatus(session: GuildSession): SessionStatus {
     if (session.status !== "playing") return session.status;
-    if (this.broadcastStatus === "playing") return "playing";
-    return this.broadcastStatus === "reconnecting" ? "reconnecting" : "connecting";
+    if (this.broadcast.status === "playing") return "playing";
+    return this.broadcast.status === "reconnecting" ? "reconnecting" : "connecting";
   }
 
   private connectionIsDestroyed(connection: VoiceConnection): boolean {
