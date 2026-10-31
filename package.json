@@ -2,7 +2,7 @@
   "name": "discord-bot-nex",
   "version": "0.1.0",
   "private": true,
-  "description": "Discord radio/music bot",
+  "description": "NEX · bot de radio para Discord: transmite la radio NEX en canales de voz con un solo stream compartido, metadata en vivo y métricas de Prometheus",
   "license": "MIT",
   "author": "John Moya C.",
   "repository": {
