@@ -1,5 +1,5 @@
 import ffmpegPath from "ffmpeg-static";
-import { Client, Events, GatewayIntentBits } from "discord.js";
+import { Client, Events, GatewayIntentBits, type Interaction } from "discord.js";
 import { env } from "./env";
 import { HealthServer } from "./health";
 import { logger } from "./logger";
@@ -40,7 +40,7 @@ client.once(Events.ClientReady, (readyClient) => {
   });
 });
 
-client.on(Events.InteractionCreate, async (interaction) => {
+async function handleInteraction(interaction: Interaction): Promise<void> {
   if (!interaction.isChatInputCommand()) return;
   const command = canonicalCommand(interaction.commandName);
   if (!["play", "stop", "nowplaying", "status"].includes(command)) return;
@@ -88,7 +88,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await interaction.editReply("Ocurrio un error al procesar el comando.").catch(() => null);
     }
   }
-});
+}
+
+client.on(Events.InteractionCreate, (interaction) => void handleInteraction(interaction));
 
 client.on(Events.VoiceStateUpdate, (oldState, newState) => {
   radio.onVoiceStateUpdate(oldState, newState);
@@ -104,7 +106,7 @@ async function shutdown(signal: string, exitCode = 0): Promise<void> {
       error: error instanceof Error ? error.message : String(error),
     });
   });
-  client.destroy();
+  void client.destroy();
   process.exitCode = exitCode;
 }
 

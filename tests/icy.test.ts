@@ -6,11 +6,9 @@ import { IcyDemuxer, parseIcyMetadata } from "../src/radio/RadioManager";
 test("IcyDemuxer separa audio y metadata aunque los chunks esten fragmentados", async () => {
   const demuxer = new IcyDemuxer(4);
   const audio: Buffer[] = [];
-  let metadata: Buffer | null = null;
+  const metadata: Buffer[] = [];
   demuxer.on("data", (chunk: Buffer) => audio.push(chunk));
-  demuxer.on("metadata", (chunk: Buffer) => {
-    metadata = chunk;
-  });
+  demuxer.on("metadata", (chunk: Buffer) => metadata.push(chunk));
 
   const metadataBlock = Buffer.alloc(32);
   metadataBlock.write("StreamTitle='Song';", "latin1");
@@ -26,7 +24,8 @@ test("IcyDemuxer separa audio y metadata aunque los chunks esten fragmentados", 
   await once(demuxer, "end");
 
   assert.equal(Buffer.concat(audio).toString(), "abcdefgh");
-  assert.equal(metadata?.subarray(0, 19).toString("latin1"), "StreamTitle='Song';");
+  assert.equal(metadata.length, 1);
+  assert.equal(metadata[0]?.subarray(0, 19).toString("latin1"), "StreamTitle='Song';");
 });
 
 test("IcyDemuxer omite bloques de metadata vacios", async () => {

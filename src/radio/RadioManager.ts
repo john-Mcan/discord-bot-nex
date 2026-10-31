@@ -987,7 +987,7 @@ export class RadioManager {
         for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
         return;
       } catch (error) {
-        if (!stillCurrent()) throw new Error("La radio se detuvo");
+        if (!stillCurrent()) throw new Error("La radio se detuvo", { cause: error });
         lastError = errorMessage(error);
         this.lastStreamError = lastError;
         logger.warn("stream.start_attempt_failed", { attempt, error: lastError });
@@ -1377,7 +1377,7 @@ export class RadioManager {
       this.client.channels.cache.get(channelId) ??
       (await this.client.channels.fetch(channelId).catch(() => null));
     if (!channel || !("send" in channel) || typeof channel.send !== "function") return null;
-    return channel as unknown as SendableChannel;
+    return channel;
   }
 
   private schedulePersistentNowPlayingUpdate(session: GuildSession): void {
