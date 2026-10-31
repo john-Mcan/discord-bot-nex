@@ -9,7 +9,6 @@ import {
   joinVoiceChannel,
   type AudioPlayer,
   type DiscordGatewayAdapterCreator,
-  type PlayerSubscription,
   type VoiceConnection,
 } from "@discordjs/voice";
 import {
@@ -17,12 +16,10 @@ import {
   ActivityType,
   AttachmentBuilder,
   ButtonBuilder,
-  ButtonStyle,
   ChannelType,
   EmbedBuilder,
   GuildMember,
   PermissionFlagsBits,
-  escapeMarkdown,
   type ChatInputCommandInteraction,
   type Client,
   type Message,
@@ -53,53 +50,27 @@ import {
   type MetadataExtras,
   type SongInfo,
 } from "./metadata";
+import {
+  buildNowPlayingPayload,
+  buildStatusEmbed,
+  buildStoppedPayload,
+  statusLabel,
+  type EmbedPayload,
+  type Station,
+} from "./nowPlayingView";
+import { sessionContext, type GuildSession, type SessionStatus } from "./session";
 
 const PLAYER_START_TIMEOUT_MS = 20_000;
 const CONNECTION_READY_TIMEOUT_MS = 20_000;
 const STREAM_STALL_TIMEOUT_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 15_000;
 const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
-// Colores de la marca NEX (los mismos de la web).
-const COLOR_LIVE = 0xff0ea2;
-const COLOR_WARNING = 0xfffc00;
-const COLOR_OFFLINE = 0x818192;
 const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
-// La cuenta regresiva llega a cero cuando cambia el audio: la siguiente
-// cancion empieza 1 s despues del ends_at de la anterior.
-const COUNTDOWN_DISPLAY_LAG_MS = 1_000;
-
-type SessionStatus = "connecting" | "playing" | "reconnecting" | "stopping" | "stopped";
 
 type BroadcastStatus = "idle" | "connecting" | "playing" | "reconnecting";
 
 type MetadataSource = "icy" | "json" | null;
-
-// Una sesion por servidor: solo su conexion de voz y su mensaje. El stream,
-// el reproductor y la metadata son compartidos por todas las sesiones.
-type GuildSession = {
-  id: string;
-  guildId: string;
-  voiceChannelId: string;
-  textChannelId: string;
-  createdAt: number;
-  // Estado de la conexion de voz; el estado visible combina este con el del stream.
-  status: SessionStatus;
-  connection: VoiceConnection;
-  subscription?: PlayerSubscription;
-  idleTimer?: NodeJS.Timeout;
-  idleGeneration: number;
-  idleRefreshRequested: boolean;
-  idleRefreshPromise?: Promise<void>;
-  voiceRecoveryPromise?: Promise<void>;
-  stopPromise?: Promise<void>;
-  totalRetries: number;
-  lastError: string | null;
-  nowPlayingMessage?: Message;
-  nowPlayingUpdateTimer?: NodeJS.Timeout;
-  nowPlayingRevision: number;
-  stopping: boolean;
-};
 
 type SendableChannel = {
   send: (options: {
@@ -109,12 +80,6 @@ type SendableChannel = {
     components?: ActionRowBuilder<ButtonBuilder>[];
     allowedMentions?: { parse: never[] };
   }) => Promise<Message>;
-};
-
-type EmbedPayload = {
-  embeds: EmbedBuilder[];
-  files: AttachmentBuilder[];
-  components: ActionRowBuilder<ButtonBuilder>[];
 };
 
 export type RadioManagerConfig = {
@@ -138,19 +103,6 @@ export type RadioMetrics = {
   metadataUpdates: number;
   commands: Record<string, number>;
 };
-
-function sessionContext(session: GuildSession): Record<string, unknown> {
-  return {
-    sessionId: session.id,
-    guildId: session.guildId,
-    voiceChannelId: session.voiceChannelId,
-    status: session.status,
-  };
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
-}
 
 export class RadioManager {
   private readonly sessions = new Map<string, GuildSession>();
@@ -267,7 +219,7 @@ export class RadioManager {
         await interaction.editReply(
           status === "playing"
             ? `Ya estoy reproduciendo en **${voiceChannel.name}**.`
-            : `La sesion de **${voiceChannel.name}** esta ${this.statusLabel(status).toLowerCase()}.`,
+            : `La sesion de **${voiceChannel.name}** esta ${statusLabel(status).toLowerCase()}.`,
         );
         await this.publishPersistentNowPlaying(existing, true);
         this.requestIdleRefresh(existing);
@@ -369,41 +321,19 @@ export class RadioManager {
       return;
     }
     const listeners = await this.humanListenerCount(session);
-    const uptimeMs = Date.now() - session.createdAt;
-    const ping = session.connection.ping;
-    const status = this.effectiveStatus(session);
-    const lastError = session.lastError ?? this.lastStreamError;
-    const embed = new EmbedBuilder()
-      .setColor(status === "playing" ? COLOR_LIVE : COLOR_WARNING)
-      .setTitle(`Estado — ${this.stationName}`)
-      .addFields(
-        { name: "Estado", value: this.statusLabel(status), inline: true },
-        { name: "Canal", value: `<#${session.voiceChannelId}>`, inline: true },
-        { name: "Oyentes", value: String(listeners), inline: true },
-        { name: "Uptime", value: this.formatDuration(uptimeMs), inline: true },
-        {
-          name: "Ping voz",
-          value: `WS ${ping.ws ?? "—"} ms / UDP ${ping.udp ?? "—"} ms`,
-          inline: true,
-        },
-        {
-          name: "Reintentos",
-          value: `Voz ${session.totalRetries} / Stream ${this.broadcastRetries}`,
-          inline: true,
-        },
-        {
-          name: "Metadata",
-          value: this.metadataSource?.toUpperCase() ?? "No disponible",
-          inline: true,
-        },
-        {
-          name: "Ultimo audio",
-          value: this.lastAudioAt ? `<t:${Math.floor(this.lastAudioAt / 1000)}:R>` : "—",
-          inline: true,
-        },
-      )
-      .setTimestamp();
-    if (lastError) embed.addFields({ name: "Ultimo error", value: lastError.slice(0, 1024) });
+    const embed = buildStatusEmbed({
+      stationName: this.stationName,
+      status: this.effectiveStatus(session),
+      voiceChannelId: session.voiceChannelId,
+      listeners,
+      uptimeMs: Date.now() - session.createdAt,
+      ping: session.connection.ping,
+      voiceRetries: session.totalRetries,
+      streamRetries: this.broadcastRetries,
+      metadataSource: this.metadataSource,
+      lastAudioAt: this.lastAudioAt,
+      lastError: session.lastError ?? this.lastStreamError,
+    });
     await interaction.reply({ embeds: [embed] });
   }
 
@@ -1164,41 +1094,16 @@ export class RadioManager {
       this.covers.resolve(this.currentArtworkUrl, true),
       this.stationLogo(),
     ]);
-    const status = this.effectiveStatus(session);
-    const live = status === "playing";
-    const embed = new EmbedBuilder()
-      .setColor(live ? COLOR_LIVE : COLOR_WARNING)
-      .setAuthor(this.authorLine(live ? "EN VIVO" : this.statusLabel(status).toUpperCase(), logo));
-
-    const lines: string[] = [];
-    if (!song) lines.push("_Esperando información de la canción..._");
-    else {
-      embed.setTitle(truncate(escapeMarkdown(song.title), 256));
-      if (this.config.websiteUrl) embed.setURL(this.config.websiteUrl);
-      if (song.artist) lines.push(truncate(escapeMarkdown(song.artist), 512));
-    }
-    if (lines.length > 0) lines.push("");
-    if (!live) lines.push(`⚠️ ${this.statusLabel(status)} con la radio...`);
-    const details: string[] = [];
-    const countdownAt = extras.endsAt ? extras.endsAt + COUNTDOWN_DISPLAY_LAG_MS : null;
-    if (live && countdownAt && countdownAt > Date.now()) {
-      // Discord actualiza la cuenta regresiva solo, sin editar el mensaje.
-      details.push(`⏱️ Termina <t:${Math.ceil(countdownAt / 1000)}:R>`);
-    }
-    details.push(`🎧 ${listeners} en <#${session.voiceChannelId}>`);
-    lines.push(details.join("  ·  "));
-    if (extras.voted) lines.push("🗳️ Elegida por votación de la comunidad");
-    if (extras.votingOpen && this.config.websiteUrl) {
-      lines.push(
-        `🗳️ Votación abierta: elige la próxima en [${this.websiteLabel()}](${this.config.websiteUrl})`,
-      );
-    }
-    embed.setDescription(lines.join("\n"));
-    return {
-      embeds: [embed],
-      files: this.attachImages(embed, cover, logo),
-      components: this.linkButtons(),
-    };
+    return buildNowPlayingPayload({
+      station: this.station(),
+      status: this.effectiveStatus(session),
+      song,
+      extras,
+      listeners,
+      voiceChannelId: session.voiceChannelId,
+      cover,
+      logo,
+    });
   }
 
   private async updatePersistentAsStopped(session: GuildSession, reason: string): Promise<void> {
@@ -1208,67 +1113,12 @@ export class RadioManager {
       this.covers.resolve(this.currentArtworkUrl, false),
       this.stationLogo(),
     ]);
-    const song = this.currentSong;
-    const lines = [`Motivo: ${this.stopReasonLabel(reason)}.`];
-    if (song) {
-      const artist = song.artist ? ` · ${escapeMarkdown(song.artist)}` : "";
-      lines.push(truncate(`Última canción: **${escapeMarkdown(song.title)}**${artist}`, 1024));
-    }
-    lines.push("", "Usa `/play` para volver a escucharla.");
-    const embed = new EmbedBuilder()
-      .setColor(COLOR_OFFLINE)
-      .setAuthor(this.authorLine("DESCONECTADA", logo))
-      .setTitle("Radio desconectada")
-      .setDescription(lines.join("\n"));
-    const files = this.attachImages(embed, cover, logo);
-    await session.nowPlayingMessage
-      .edit({ embeds: [embed], files, attachments: [], components: this.linkButtons() })
-      .catch(() => null);
+    const payload = buildStoppedPayload(this.station(), reason, this.currentSong, cover, logo);
+    await session.nowPlayingMessage.edit({ ...payload, attachments: [] }).catch(() => null);
   }
 
-  private authorLine(
-    state: string,
-    logo: Artwork | null,
-  ): { name: string; iconURL?: string; url?: string } {
-    return {
-      name: truncate(`${this.stationName} · ${state}`, 256),
-      ...(logo ? { iconURL: `attachment://${logo.fileName}` } : {}),
-      ...(this.config.websiteUrl ? { url: this.config.websiteUrl } : {}),
-    };
-  }
-
-  private linkButtons(): ActionRowBuilder<ButtonBuilder>[] {
-    if (!this.config.websiteUrl) return [];
-    const button = new ButtonBuilder()
-      .setStyle(ButtonStyle.Link)
-      .setLabel(`Escuchar en ${this.websiteLabel()}`)
-      .setURL(this.config.websiteUrl)
-      .setEmoji("🌐");
-    return [new ActionRowBuilder<ButtonBuilder>().addComponents(button)];
-  }
-
-  private websiteLabel(): string {
-    try {
-      return new URL(this.config.websiteUrl ?? "").hostname.replace(/^www\./, "");
-    } catch {
-      return "la web";
-    }
-  }
-
-  // Las imagenes se suben como adjuntos en vez de enlazar URLs: asi Discord no
-  // depende de su proxy de imagenes externas, que a veces falla al descargarlas
-  // y deja el embed sin portada.
-  private attachImages(
-    embed: EmbedBuilder,
-    cover: Artwork | null,
-    logo: Artwork | null,
-  ): AttachmentBuilder[] {
-    const files = [cover, logo]
-      .filter((image): image is Artwork => image !== null)
-      .map((image) => new AttachmentBuilder(image.data, { name: image.fileName }));
-    const thumbnail = cover ?? logo;
-    if (thumbnail) embed.setThumbnail(`attachment://${thumbnail.fileName}`);
-    return files;
+  private station(): Station {
+    return { name: this.stationName, websiteUrl: this.config.websiteUrl };
   }
 
   private stationLogo(): Promise<Artwork | null> {
@@ -1282,40 +1132,7 @@ export class RadioManager {
     return this.broadcastStatus === "reconnecting" ? "reconnecting" : "connecting";
   }
 
-  private statusLabel(status: SessionStatus): string {
-    return {
-      connecting: "Conectando",
-      playing: "Reproduciendo",
-      reconnecting: "Reconectando",
-      stopping: "Desconectando",
-      stopped: "Desconectada",
-    }[status];
-  }
-
-  private stopReasonLabel(reason: string): string {
-    return (
-      {
-        command: "comando /stop",
-        manual_disconnect: "desconexión manual desde Discord",
-        idle_timeout: "canal sin oyentes",
-        retries_exhausted: "fallos de conexión",
-        start_failed: "no se pudo iniciar",
-        shutdown: "apagado del bot",
-        replaced: "sesión trasladada",
-        connection_destroyed: "conexión cerrada",
-      }[reason] ?? reason
-    );
-  }
-
   private connectionIsDestroyed(connection: VoiceConnection): boolean {
     return connection.state.status === VoiceConnectionStatus.Destroyed;
-  }
-
-  private formatDuration(milliseconds: number): string {
-    const seconds = Math.floor(milliseconds / 1000);
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const remainder = seconds % 60;
-    return `${hours}h ${minutes}m ${remainder}s`;
   }
 }
