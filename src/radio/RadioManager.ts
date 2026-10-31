@@ -33,6 +33,7 @@ import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { logger } from "../logger";
+import { MAX_START_ATTEMPTS, retryDelayMs, sleep } from "./backoff";
 import {
   AUDIO_HIGH_WATER_MARK,
   headerValue,
@@ -57,7 +58,6 @@ const PLAYER_START_TIMEOUT_MS = 20_000;
 const CONNECTION_READY_TIMEOUT_MS = 20_000;
 const STREAM_STALL_TIMEOUT_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 15_000;
-const MAX_START_ATTEMPTS = 5;
 const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
 const ARTWORK_DOWNLOAD_TIMEOUT_MS = 8_000;
 const ARTWORK_DOWNLOAD_ATTEMPTS = 2;
@@ -195,15 +195,6 @@ export async function downloadArtwork(
   if (data.length === 0) throw new Error("La portada esta vacia");
   if (data.length > MAX_ARTWORK_BYTES) throw new Error("La portada supera el tamano maximo");
   return { url, data, fileName: `cover.${extension}` };
-}
-
-function retryDelayMs(attempt: number): number {
-  const delayMs = Math.min(30_000, 1_500 * 2 ** Math.min(attempt - 1, 4));
-  return delayMs + Math.floor(Math.random() * 750);
-}
-
-function sleep(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export class RadioManager {
