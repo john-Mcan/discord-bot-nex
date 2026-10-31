@@ -29,10 +29,10 @@ import {
   type VoiceState,
 } from "discord.js";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import * as path from "node:path";
 import { PassThrough } from "node:stream";
+import { errorMessage } from "../errors";
 import { logger } from "../logger";
+import { CoverCache, loadStationLogo, type Artwork } from "./artwork";
 import { MAX_START_ATTEMPTS, retryDelayMs, sleep } from "./backoff";
 import {
   AUDIO_HIGH_WATER_MARK,
@@ -59,22 +59,10 @@ const CONNECTION_READY_TIMEOUT_MS = 20_000;
 const STREAM_STALL_TIMEOUT_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 15_000;
 const PRESENCE_UPDATE_INTERVAL_MS = 10_000;
-const ARTWORK_DOWNLOAD_TIMEOUT_MS = 8_000;
-const ARTWORK_DOWNLOAD_ATTEMPTS = 2;
-const MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
-// Logo de la radio: icono de la cabecera del mensaje y portada de respaldo.
-const STATION_LOGO_PATH = path.resolve(__dirname, "../../img/icon-512.png");
-const STATION_LOGO_FILE = "logo.png";
 // Colores de la marca NEX (los mismos de la web).
 const COLOR_LIVE = 0xff0ea2;
 const COLOR_WARNING = 0xfffc00;
 const COLOR_OFFLINE = 0x818192;
-const ARTWORK_EXTENSIONS: Record<string, string> = {
-  "image/jpeg": "jpg",
-  "image/png": "png",
-  "image/webp": "webp",
-  "image/gif": "gif",
-};
 const BROADCAST_LINGER_MS = 15_000;
 const NOW_PLAYING_DEBOUNCE_MS = 300;
 // La cuenta regresiva llega a cero cuando cambia el audio: la siguiente
@@ -86,12 +74,6 @@ type SessionStatus = "connecting" | "playing" | "reconnecting" | "stopping" | "s
 type BroadcastStatus = "idle" | "connecting" | "playing" | "reconnecting";
 
 type MetadataSource = "icy" | "json" | null;
-
-export type Artwork = {
-  url: string | null;
-  data: Buffer;
-  fileName: string;
-};
 
 // Una sesion por servidor: solo su conexion de voz y su mensaje. El stream,
 // el reproductor y la metadata son compartidos por todas las sesiones.
@@ -170,33 +152,6 @@ function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-export async function downloadArtwork(
-  url: string,
-  timeoutMs = ARTWORK_DOWNLOAD_TIMEOUT_MS,
-): Promise<Artwork> {
-  const response = await fetch(url, {
-    headers: { Accept: "image/*", "User-Agent": "discord-bot-nex/0.2" },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  const contentType =
-    response.headers.get("content-type")?.split(";")[0]?.trim().toLowerCase() ?? "";
-  const extension = ARTWORK_EXTENSIONS[contentType];
-  if (!extension)
-    throw new Error(`Tipo de contenido no soportado: ${contentType || "desconocido"}`);
-  if (Number(response.headers.get("content-length")) > MAX_ARTWORK_BYTES) {
-    throw new Error("La portada supera el tamano maximo");
-  }
-  const data = Buffer.from(await response.arrayBuffer());
-  if (data.length === 0) throw new Error("La portada esta vacia");
-  if (data.length > MAX_ARTWORK_BYTES) throw new Error("La portada supera el tamano maximo");
-  return { url, data, fileName: `cover.${extension}` };
-}
-
 export class RadioManager {
   private readonly sessions = new Map<string, GuildSession>();
   private readonly commandCounts = new Map<string, number>();
@@ -235,8 +190,7 @@ export class RadioManager {
   private metadataUpdatedAt = 0;
   private metadataTimer?: NodeJS.Timeout;
   private metadataPolling = false;
-  private artwork?: Artwork;
-  private artworkDownload?: { url: string; promise: Promise<Artwork | null> };
+  private readonly covers = new CoverCache((url) => url === this.currentArtworkUrl);
 
   constructor(
     private readonly client: Client,
@@ -898,8 +852,7 @@ export class RadioManager {
     this.currentArtworkUrl = null;
     this.metadataSource = null;
     this.metadataUpdatedAt = 0;
-    this.artwork = undefined;
-    this.artworkDownload = undefined;
+    this.covers.clear();
     logger.info("broadcast.stopped");
   }
 
@@ -996,7 +949,7 @@ export class RadioManager {
     if (this.sessions.size > 0) {
       this.schedulePresence(title);
       // La portada empieza a bajar ya, en paralelo con la espera de la edicion.
-      if (artworkChanged) void this.resolveCover(this.currentArtworkUrl, true);
+      if (artworkChanged) void this.covers.resolve(this.currentArtworkUrl, true);
     }
     for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
   }
@@ -1208,7 +1161,7 @@ export class RadioManager {
     const extras = this.currentExtras;
     const [listeners, cover, logo] = await Promise.all([
       this.humanListenerCount(session),
-      this.resolveCover(this.currentArtworkUrl, true),
+      this.covers.resolve(this.currentArtworkUrl, true),
       this.stationLogo(),
     ]);
     const status = this.effectiveStatus(session);
@@ -1252,7 +1205,7 @@ export class RadioManager {
     if (!session.nowPlayingMessage) return;
     // Sin descarga: no retrasamos la desconexion esperando a la red.
     const [cover, logo] = await Promise.all([
-      this.resolveCover(this.currentArtworkUrl, false),
+      this.covers.resolve(this.currentArtworkUrl, false),
       this.stationLogo(),
     ]);
     const song = this.currentSong;
@@ -1318,47 +1271,8 @@ export class RadioManager {
     return files;
   }
 
-  private async resolveCover(url: string | null, allowDownload: boolean): Promise<Artwork | null> {
-    if (!url) return null;
-    if (this.artwork?.url === url) return this.artwork;
-    if (!allowDownload) return null;
-    // Todas las sesiones que publican a la vez comparten la misma descarga.
-    let download = this.artworkDownload;
-    if (!download || download.url !== url) {
-      const promise = this.downloadArtworkWithRetry(url);
-      const current = { url, promise };
-      download = current;
-      this.artworkDownload = current;
-      void promise.then(() => {
-        if (this.artworkDownload === current) this.artworkDownload = undefined;
-      });
-    }
-    return download.promise;
-  }
-
-  private async downloadArtworkWithRetry(url: string): Promise<Artwork | null> {
-    for (let attempt = 1; attempt <= ARTWORK_DOWNLOAD_ATTEMPTS; attempt += 1) {
-      try {
-        const artwork = await downloadArtwork(url);
-        if (this.currentArtworkUrl === url) this.artwork = artwork;
-        return artwork;
-      } catch (error) {
-        logger.warn("artwork.download_failed", { url, attempt, error: errorMessage(error) });
-      }
-    }
-    return null;
-  }
-
   private stationLogo(): Promise<Artwork | null> {
-    this.stationLogoPromise ??= readFile(STATION_LOGO_PATH)
-      .then((data): Artwork => ({ url: null, data, fileName: STATION_LOGO_FILE }))
-      .catch((error: unknown) => {
-        logger.warn("artwork.logo_unavailable", {
-          path: STATION_LOGO_PATH,
-          error: errorMessage(error),
-        });
-        return null;
-      });
+    this.stationLogoPromise ??= loadStationLogo();
     return this.stationLogoPromise;
   }
 
