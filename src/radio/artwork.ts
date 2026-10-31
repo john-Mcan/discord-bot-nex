@@ -9,7 +9,7 @@ const ARTWORK_DOWNLOAD_TIMEOUT_MS = 8_000;
 const ARTWORK_DOWNLOAD_ATTEMPTS = 2;
 const MAX_ARTWORK_BYTES = 8 * 1024 * 1024;
 // Logo de la radio: icono de la cabecera del mensaje y portada de respaldo.
-export const STATION_LOGO_PATH = path.resolve(__dirname, "../../img/icon-512.png");
+export const STATION_LOGO_PATH = path.resolve(__dirname, "../../assets/icon-512.png");
 const STATION_LOGO_FILE = "logo.png";
 const ARTWORK_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
