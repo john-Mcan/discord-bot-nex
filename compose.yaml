@@ -1,0 +1,23 @@
+# Ejemplo para un servidor con Docker Compose:
+#   docker compose run --rm bot node dist/deploy-commands.js   # una vez
+#   docker compose up -d --build
+services:
+  bot:
+    build: .
+    image: discord-bot-nex
+    restart: unless-stopped
+    # Un init como PID 1 recoge los procesos de FFmpeg que terminan.
+    init: true
+    env_file: .env
+    environment:
+      # /healthz y /metrics escuchan en todas las interfaces del contenedor;
+      # el puerto se publica solo en el loopback del servidor. Si cambias
+      # HEALTH_PORT en .env, cambia tambien el puerto de abajo.
+      HEALTH_HOST: 0.0.0.0
+    ports:
+      - "127.0.0.1:3000:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
