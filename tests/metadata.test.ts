@@ -9,7 +9,7 @@ import {
   nextMetadataPollDelay,
   readPath,
   splitIcyTitle,
-} from "../src/radio/RadioManager";
+} from "../src/radio/metadata";
 
 // Respuesta real (recortada) de https://api.nex-radio.com/api/radio/snapshot.
 const nexSnapshot = {
