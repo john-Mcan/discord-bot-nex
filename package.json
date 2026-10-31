@@ -10,9 +10,14 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "deploy:commands": "tsx src/deploy-commands.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js",
     "test": "tsx --test \"tests/**/*.test.ts\"",
-    "start": "node dist/index.js"
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run lint && npm run format:check && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
@@ -21,8 +26,12 @@
     "ffmpeg-static": "^5.3.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.19.0",
+    "eslint": "^10.14.0",
+    "prettier": "^3.9.10",
     "tsx": "^4.23.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1"
   }
 }
