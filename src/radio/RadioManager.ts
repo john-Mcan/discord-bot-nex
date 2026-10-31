@@ -6,49 +6,26 @@ import {
   type VoiceConnection,
 } from "@discordjs/voice";
 import {
-  ActionRowBuilder,
-  AttachmentBuilder,
-  ButtonBuilder,
   ChannelType,
-  EmbedBuilder,
   GuildMember,
   PermissionFlagsBits,
   type ChatInputCommandInteraction,
   type Client,
-  type Message,
   type VoiceState,
 } from "discord.js";
 import { randomUUID } from "node:crypto";
 import { errorMessage } from "../errors";
 import { logger } from "../logger";
-import { loadStationLogo, type Artwork } from "./artwork";
 import { MAX_START_ATTEMPTS, retryDelayMs, sleep } from "./backoff";
 import { Broadcast } from "./Broadcast";
 import { inferAzuraCastMetadataUrl } from "./metadata";
 import { MetadataTracker, type MetadataChange } from "./MetadataTracker";
-import {
-  buildNowPlayingPayload,
-  buildStatusEmbed,
-  buildStoppedPayload,
-  statusLabel,
-  type EmbedPayload,
-  type Station,
-} from "./nowPlayingView";
+import { NowPlayingMessages } from "./NowPlayingMessages";
+import { buildStatusEmbed, statusLabel } from "./nowPlayingView";
 import { Presence } from "./presence";
-import { sessionContext, type GuildSession, type SessionStatus } from "./session";
+import { effectiveStatus, sessionContext, type GuildSession, type SessionStatus } from "./session";
 
 const CONNECTION_READY_TIMEOUT_MS = 20_000;
-const NOW_PLAYING_DEBOUNCE_MS = 300;
-
-type SendableChannel = {
-  send: (options: {
-    content?: string;
-    embeds?: EmbedBuilder[];
-    files?: AttachmentBuilder[];
-    components?: ActionRowBuilder<ButtonBuilder>[];
-    allowedMentions?: { parse: never[] };
-  }) => Promise<Message>;
-};
 
 export type RadioManagerConfig = {
   streamUrl: string;
@@ -76,10 +53,10 @@ export class RadioManager {
   private readonly sessions = new Map<string, GuildSession>();
   private readonly commandCounts = new Map<string, number>();
   private voiceRetries = 0;
-  private stationLogoPromise?: Promise<Artwork | null>;
   private readonly metadata: MetadataTracker;
   private readonly presence: Presence;
   private readonly broadcast: Broadcast;
+  private readonly messages: NowPlayingMessages;
 
   constructor(
     private readonly client: Client,
@@ -96,10 +73,9 @@ export class RadioManager {
     });
     this.broadcast = new Broadcast(config, this.metadata, {
       sessionCount: () => this.sessions.size,
-      notify: (content) => this.broadcastText(content),
+      notify: (content) => this.messages.sendToAll(this.sessions.values(), content),
       onPlaying: () => {
-        for (const session of this.sessions.values())
-          this.schedulePersistentNowPlayingUpdate(session);
+        for (const session of this.sessions.values()) this.messages.scheduleUpdate(session);
       },
       onRetriesExhausted: async () => {
         await Promise.all(
@@ -108,6 +84,11 @@ export class RadioManager {
           ),
         );
       },
+    });
+    this.messages = new NowPlayingMessages(client, this.metadata, {
+      station: () => ({ name: this.broadcast.stationName, websiteUrl: config.websiteUrl }),
+      statusOf: (session) => this.effectiveStatus(session),
+      listenerCount: (session) => this.humanListenerCount(session),
     });
   }
 
@@ -180,7 +161,7 @@ export class RadioManager {
             ? `Ya estoy reproduciendo en **${voiceChannel.name}**.`
             : `La sesion de **${voiceChannel.name}** esta ${statusLabel(status).toLowerCase()}.`,
         );
-        await this.publishPersistentNowPlaying(existing, true);
+        await this.messages.publish(existing, true);
         this.requestIdleRefresh(existing);
         return;
       }
@@ -214,7 +195,7 @@ export class RadioManager {
       await interaction.editReply(
         `Reproduciendo **${this.broadcast.stationName}** en **${voiceChannel.name}**.`,
       );
-      await this.publishPersistentNowPlaying(session, true);
+      await this.messages.publish(session, true);
       this.requestIdleRefresh(session);
     } catch (error) {
       logger.error("play.failed", { ...sessionContext(session), error: errorMessage(error) });
@@ -267,7 +248,7 @@ export class RadioManager {
       return;
     }
     if (!(await this.defer(interaction))) return;
-    await interaction.editReply(await this.buildNowPlayingPayload(session));
+    await interaction.editReply(await this.messages.build(session));
   }
 
   public async status(interaction: ChatInputCommandInteraction): Promise<void> {
@@ -465,7 +446,7 @@ export class RadioManager {
         session.status = "reconnecting";
         session.totalRetries += 1;
         this.voiceRetries += 1;
-        await this.sendText(
+        await this.messages.sendText(
           session,
           `La radio perdio la conexion. Reintentando (${attempt}/${MAX_START_ATTEMPTS})...`,
         );
@@ -479,7 +460,7 @@ export class RadioManager {
         session.status = "playing";
         session.lastError = null;
         logger.info("voice.ready", { ...sessionContext(session), attempt });
-        if (!initial) this.schedulePersistentNowPlayingUpdate(session);
+        if (!initial) this.messages.scheduleUpdate(session);
         return;
       } catch (error) {
         lastError = errorMessage(error);
@@ -492,7 +473,7 @@ export class RadioManager {
       }
     }
 
-    await this.sendText(session, "No pude mantener la radio activa y me desconectare.");
+    await this.messages.sendText(session, "No pude mantener la radio activa y me desconectare.");
     await this.stopSession(session, "retries_exhausted");
     throw new Error(lastError);
   }
@@ -534,7 +515,7 @@ export class RadioManager {
       // La portada empieza a bajar ya, en paralelo con la espera de la edicion.
       if (artworkChanged) void this.metadata.cover(true);
     }
-    for (const session of this.sessions.values()) this.schedulePersistentNowPlayingUpdate(session);
+    for (const session of this.sessions.values()) this.messages.scheduleUpdate(session);
   }
 
   private syncPresence(): void {
@@ -574,7 +555,7 @@ export class RadioManager {
       session.idleTimer = undefined;
       void this.disconnectIfStillEmpty(session, generation);
     }, this.config.idleDisconnectMinutes * 60_000);
-    void this.sendText(
+    void this.messages.sendText(
       session,
       `No hay usuarios escuchando. Me desconectare en ${this.config.idleDisconnectMinutes} min si nadie vuelve.`,
     );
@@ -593,7 +574,7 @@ export class RadioManager {
       this.cancelIdleTimer(session);
       return;
     }
-    await this.sendText(session, "No hay usuarios escuchando. Hasta pronto.");
+    await this.messages.sendText(session, "No hay usuarios escuchando. Hasta pronto.");
     await this.stopSession(session, "idle_timeout");
   }
 
@@ -636,7 +617,7 @@ export class RadioManager {
     } catch {
       // Already destroyed.
     }
-    await this.updatePersistentAsStopped(session, reason);
+    await this.messages.markStopped(session, reason);
     session.status = "stopped";
     if (this.sessions.get(session.guildId) === session) this.sessions.delete(session.guildId);
     this.broadcast.scheduleShutdown();
@@ -644,106 +625,8 @@ export class RadioManager {
     logger.info("session.stopped", { ...sessionContext(session), reason });
   }
 
-  private async sendText(session: GuildSession, content: string): Promise<void> {
-    const channel = await this.getSendableChannel(session.textChannelId);
-    if (!channel) return;
-    await channel.send({ content, allowedMentions: { parse: [] } }).catch((error: unknown) => {
-      logger.warn("text.send_failed", { ...sessionContext(session), error: errorMessage(error) });
-    });
-  }
-
-  private async broadcastText(content: string): Promise<void> {
-    const sessions = [...this.sessions.values()].filter((session) => !session.stopping);
-    await Promise.all(sessions.map((session) => this.sendText(session, content)));
-  }
-
-  private async getSendableChannel(channelId: string): Promise<SendableChannel | null> {
-    const channel =
-      this.client.channels.cache.get(channelId) ??
-      (await this.client.channels.fetch(channelId).catch(() => null));
-    if (!channel || !("send" in channel) || typeof channel.send !== "function") return null;
-    return channel;
-  }
-
-  private schedulePersistentNowPlayingUpdate(session: GuildSession): void {
-    if (!session.nowPlayingMessage || session.stopping || session.nowPlayingUpdateTimer) return;
-    session.nowPlayingUpdateTimer = setTimeout(() => {
-      session.nowPlayingUpdateTimer = undefined;
-      void this.publishPersistentNowPlaying(session, false);
-    }, NOW_PLAYING_DEBOUNCE_MS);
-  }
-
-  private async publishPersistentNowPlaying(session: GuildSession, create: boolean): Promise<void> {
-    const metadataUpdatedAt = this.metadata.updatedAt;
-    const revision = ++session.nowPlayingRevision;
-    const payload = await this.buildNowPlayingPayload(session);
-    // Descargar la portada puede tardar: si mientras tanto empezo otra
-    // actualizacion, esta ya esta obsoleta y no debe pisar a la nueva.
-    if (revision !== session.nowPlayingRevision || session.stopping) return;
-    if (session.nowPlayingMessage) {
-      await session.nowPlayingMessage
-        .edit({ ...payload, attachments: [] })
-        .catch((error: unknown) => {
-          logger.warn("now_playing.edit_failed", {
-            ...sessionContext(session),
-            error: errorMessage(error),
-          });
-          session.nowPlayingMessage = undefined;
-        });
-      return;
-    }
-    if (!create) return;
-    const channel = await this.getSendableChannel(session.textChannelId);
-    if (!channel) return;
-    session.nowPlayingMessage = await channel
-      .send({ ...payload, allowedMentions: { parse: [] } })
-      .catch(() => undefined);
-    if (session.nowPlayingMessage && this.metadata.updatedAt !== metadataUpdatedAt) {
-      this.schedulePersistentNowPlayingUpdate(session);
-    }
-  }
-
-  private async buildNowPlayingPayload(session: GuildSession): Promise<EmbedPayload> {
-    const song = this.metadata.song;
-    const extras = this.metadata.extras;
-    const [listeners, cover, logo] = await Promise.all([
-      this.humanListenerCount(session),
-      this.metadata.cover(true),
-      this.stationLogo(),
-    ]);
-    return buildNowPlayingPayload({
-      station: this.station(),
-      status: this.effectiveStatus(session),
-      song,
-      extras,
-      listeners,
-      voiceChannelId: session.voiceChannelId,
-      cover,
-      logo,
-    });
-  }
-
-  private async updatePersistentAsStopped(session: GuildSession, reason: string): Promise<void> {
-    if (!session.nowPlayingMessage) return;
-    // Sin descarga: no retrasamos la desconexion esperando a la red.
-    const [cover, logo] = await Promise.all([this.metadata.cover(false), this.stationLogo()]);
-    const payload = buildStoppedPayload(this.station(), reason, this.metadata.song, cover, logo);
-    await session.nowPlayingMessage.edit({ ...payload, attachments: [] }).catch(() => null);
-  }
-
-  private station(): Station {
-    return { name: this.broadcast.stationName, websiteUrl: this.config.websiteUrl };
-  }
-
-  private stationLogo(): Promise<Artwork | null> {
-    this.stationLogoPromise ??= loadStationLogo();
-    return this.stationLogoPromise;
-  }
-
   private effectiveStatus(session: GuildSession): SessionStatus {
-    if (session.status !== "playing") return session.status;
-    if (this.broadcast.status === "playing") return "playing";
-    return this.broadcast.status === "reconnecting" ? "reconnecting" : "connecting";
+    return effectiveStatus(session, this.broadcast.status);
   }
 
   private connectionIsDestroyed(connection: VoiceConnection): boolean {

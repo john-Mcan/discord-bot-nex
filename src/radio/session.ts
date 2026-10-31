@@ -1,5 +1,6 @@
 import type { PlayerSubscription, VoiceConnection } from "@discordjs/voice";
 import type { Message } from "discord.js";
+import type { BroadcastStatus } from "./Broadcast";
 
 export type SessionStatus = "connecting" | "playing" | "reconnecting" | "stopping" | "stopped";
 
@@ -36,4 +37,15 @@ export function sessionContext(session: GuildSession): Record<string, unknown> {
     voiceChannelId: session.voiceChannelId,
     status: session.status,
   };
+}
+
+// Estado visible de una sesion: combina su conexion de voz con el del stream
+// compartido (si la voz esta lista pero el stream reconecta, se muestra eso).
+export function effectiveStatus(
+  session: GuildSession,
+  broadcastStatus: BroadcastStatus,
+): SessionStatus {
+  if (session.status !== "playing") return session.status;
+  if (broadcastStatus === "playing") return "playing";
+  return broadcastStatus === "reconnecting" ? "reconnecting" : "connecting";
 }
