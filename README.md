@@ -20,11 +20,9 @@ transmite la señal en vivo y mantiene un mensaje «sonando ahora» con la canci
 cuenta regresiva hasta el próximo tema, un enlace para votar cuando la votación está abierta y un
 botón para escuchar en la web.
 
-<!-- Captura del mensaje «sonando ahora»: se activa cuando exista docs/capturas/sonando-ahora.png
 <p align="center">
-  <img src="docs/capturas/sonando-ahora.png" alt="Mensaje «sonando ahora» del bot en Discord" width="520">
+  <img src="docs/capturas/sonando-ahora.png" alt="Mensaje «sonando ahora» del bot en Discord: canción, artista, portada, cuenta regresiva, oyentes, votación abierta y botón «Escuchar en nex-radio.com»" width="550">
 </p>
--->
 
 Está hecho con TypeScript, [discord.js](https://discord.js.org) 14,
 [@discordjs/voice](https://github.com/discordjs/discord.js/tree/main/packages/voice) y FFmpeg
@@ -50,11 +48,9 @@ Está hecho con TypeScript, [discord.js](https://discord.js.org) 14,
 - **Operación.** Logs JSON estructurados, `/healthz` y métricas de Prometheus en `/metrics`, cooldown
   por comando e imagen Docker con healthcheck.
 
-<!-- Captura de /status: se activa cuando exista docs/capturas/status.png
 <p align="center">
-  <img src="docs/capturas/status.png" alt="Respuesta del comando /status" width="420">
+  <img src="docs/capturas/status.png" alt="Respuesta del comando /status: estado, canal, oyentes, uptime, ping de voz, reintentos, fuente de metadata y último audio" width="463">
 </p>
--->
 
 ## Arquitectura
 
@@ -190,12 +186,6 @@ del mensaje llega a cero en el fin más 1 s, justo cuando cambia el audio.
 Para detener el bot hay que estar en su canal o tener **Mover miembros**. Nadie puede trasladarlo a
 otro canal mientras haya oyentes, salvo con **Mover miembros**. Los canales Stage no están
 soportados.
-
-<!-- Captura de los comandos: se activa cuando exista docs/capturas/comandos.png
-<p align="center">
-  <img src="docs/capturas/comandos.png" alt="Autocompletado de los comandos del bot" width="420">
-</p>
--->
 
 ## Operación
 
