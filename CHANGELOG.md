@@ -6,6 +6,8 @@ Los cambios relevantes de cada versión. El formato sigue
 
 ## [Sin publicar]
 
+## [0.2.0] - 2026-10-31
+
 ### Agregado
 
 - Imagen Docker multietapa sobre `node:22-slim`, con usuario sin privilegios y healthcheck contra
@@ -27,7 +29,7 @@ Los cambios relevantes de cada versión. El formato sigue
   comportamiento ni de su API.
 - La validación de variables de entorno pasa a una función pura (`parseEnv`).
 - El logo se mueve de `img/` a `assets/`.
-- README reescrito, con arquitectura, operación y despliegue.
+- README reescrito, con capturas, arquitectura, operación y despliegue.
 
 ### Corregido
 
@@ -49,5 +51,6 @@ Corresponde al tag `estable-2026-10-08`.
 - Reconexión con backoff exponencial, desconexión por inactividad y protección contra traslados.
 - Logs JSON, `/healthz` y métricas de Prometheus.
 
-[Sin publicar]: https://github.com/john-Mcan/discord-bot-nex/compare/estable-2026-10-08...HEAD
+[Sin publicar]: https://github.com/john-Mcan/discord-bot-nex/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/john-Mcan/discord-bot-nex/compare/estable-2026-10-08...v0.2.0
 [0.1.0]: https://github.com/john-Mcan/discord-bot-nex/tree/estable-2026-10-08
